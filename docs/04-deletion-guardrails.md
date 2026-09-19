@@ -1,5 +1,9 @@
 # 04 · Deletion guardrails: the two-person rule in kube-apiserver
 
+## Scope: out-of-band changes only
+
+The GitOps path is pre-approved: a change merged through the repository ruleset (two reviewers, code owners) and applied by the Argo CD application-controller or ApplicationSet controller (`GuardrailConfig.spec.gitopsControllers`) is exempt from every rule below. Git-driven deletions of critical objects are alerted as `GitOpsCriticalDeletionApplied` so they can be correlated with the PR. Everything else that touches a critical object directly, whoever the actor is (humans with `oc`/console, the Argo CD UI/CLI acting as `argocd-server`, other controllers, cluster-admin), is out of band and subject to the two-person rule.
+
 ## Why ValidatingAdmissionPolicy (VAP)
 
 | Option | Verdict |
@@ -40,10 +44,12 @@ All rules are evaluated on the **pre-request state** (`oldObject`), so nothing c
 
 Design notes:
 
-- **Exemptions are minimal**: `system:apiserver` (loopback) and the break-glass SA. Not the garbage collector, not the namespace controller, not OLM, not Argo CD. A controller whose delete is denied simply retries and the denial is alerted, which is the desired behaviour for a critical object.
+- **`payloadUnchanged`** compares labels, `spec`, `data`, `binaryData`, `immutable`, `rules`, `aggregationRule`, `subjects`, `roleRef`, `users`, `webhooks`, Application `operation`, `metadata.finalizers` and `metadata.ownerReferences`; an approval write that touches any of them is denied.
+
+- **Exemptions are explicit**: `exemptUsers` (`system:apiserver`, the break-glass SA) and `gitopsControllers` (the two Argo CD controllers, the Git path). OLM may delete a superseded CSV during an operator upgrade (`olmServiceAccounts`, V1 clause). Not the garbage collector, not the namespace controller, not `argocd-server`. A controller whose delete is denied simply retries and the denial is alerted, which is the desired behaviour for a critical object.
 - **No clock in CEL** → TTL is enforced by the reaper CronJob (`reaper-cronjob.yaml`, every 10 min); the policy lets that identity only *remove* entries. The reaper also removes entries whose timestamp is more than 5 minutes in the **future** or unparseable, so an approver cannot extend an approval by writing a far-future time. Approvals are also wiped by V4 whenever the request changes.
 - **Binding A** (`-labelled`) uses `objectSelector` on the critical label. Kubernetes evaluates the selector against `object` **or** `oldObject`, so removing the label in the same request still matches (and V2 denies it). **Binding B** (`-named`) covers the name-protected, low-traffic kinds without a selector. Result: the policy costs nothing on the cluster's ordinary Secret/ConfigMap traffic.
-- **Fail closed**: `failurePolicy: Fail`, `parameterNotFoundAction: Deny`. If `GuardrailConfig/default` is missing, UPDATE/DELETE of critical objects is denied (not the whole cluster, thanks to the bindings' scope).
+- **Fail closed where safe**: `failurePolicy: Fail`; the labelled binding has `parameterNotFoundAction: Deny`, the named binding `Allow`, because the named binding matches every namespace/CRD/cluster-RBAC/group/OLM update cluster-wide and a missing `GuardrailConfig` must not stop OLM or the namespace lifecycle. Its absence is alerted (its deletion is `GuardrailPolicyModified`) and `verify-install.sh` checks it.
 - **Type-checking warnings are expected**: `oc get vap guardrails-critical-delete -o yaml` lists warnings such as "undefined field 'spec'" because the policy matches many kinds; evaluation is dynamic. Only a `status.conditions` error or an "expression compile" message is a problem.
 
 ## Companion policies
@@ -58,8 +64,8 @@ Design notes:
 What stops someone from deleting the policy? Five things, in depth:
 
 1. The bindings, policies, `GuardrailConfig`, `guardrails-*` RBAC and the approver groups are **critical by name** → V1 applies to them (R3 in docs/01: confirm in phase 1 that your build evaluates VAPs against `admissionregistration.k8s.io` objects; the test script includes the case).
-2. **RBAC**: no human role has `update`/`delete` on `admissionregistration.k8s.io` or `guardrails.example.com`; only the Argo CD controller SA and break-glass do.
-3. **Argo CD self-heal** recreates/reverts them within the sync interval (3 min default); the `guardrails` Application has `prune: false` and no cascade finalizer, so deleting the *Application* changes nothing on the cluster.
+2. **RBAC + hardened binding**: approvers may `patch` the policy objects only by name (`resourceNames`), and the `guardrails-gitops-only-mutation-hardened` binding denies, in **every phase**, any change to GuardrailConfig, the policies/bindings, `guardrails-*` RBAC, the privileged Groups, APIServer/OAuth and labelled CronJobs by anyone but the GitOps path, trusted mutators and break-glass. Humans can still add approval annotations to them.
+3. **Argo CD self-heal** recreates/reverts them within the sync interval (3 min default); the `guardrails` Application has no cascade finalizer, so deleting the *Application* out of band changes nothing on the cluster (and the Application is itself critical).
 4. **Alert** `GuardrailPolicyModified` (P1) on any write to them by anyone but Argo CD.
 5. **Git**: the only legitimate path is a PR with two reviewers and code-owner approval (docs/08).
 
@@ -89,16 +95,16 @@ oc annotate -n openshift-gitops argocd openshift-gitops --overwrite \
 oc delete -n openshift-gitops argocd openshift-gitops
 ```
 
-Through Git instead of `oc`: the approval annotation **cannot** be applied by Argo CD (the controller SA is not an approver, V3 denies). This is intentional: approvals are personal acts by named humans. Deleting a critical object therefore always involves two approvers running one command each, even when the *request* originated in a PR.
+Through Git instead of `oc`: if the object is managed from Git, delete it by PR. The Argo CD controller is a `gitopsController` and prunes it without the annotation workflow; `GitOpsCriticalDeletionApplied` fires so the on-call can match it to the merged PR. The annotation workflow is for out-of-band deletions and for objects that are not in Git.
 
 ## Adding or removing a critical object
 
 - Label it in Git: `guardrails.example.com/critical: "true"` (kustomize `commonLabels` for a whole component works). Argo CD applies the label; from then on deletion needs approvals.
-- Removing the label needs the same approvals as deletion (V2). Do it via the workflow, then remove it in Git.
+- Removing the label needs the same approvals as deletion (V2) when done out of band; removing it in Git is applied by the controller (GitOps path).
 
 ## Verification
 
-See docs/11 and `scripts/test-guardrails.sh` (32 cases). Minimum smoke test after apply:
+See docs/11, docs/16 (traceability matrix) and `scripts/test-guardrails.sh` (phase-aware). Minimum smoke test after apply:
 
 ```bash
 oc get vap,vapb -l app.kubernetes.io/part-of=guardrails

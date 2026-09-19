@@ -69,18 +69,34 @@ spec:
                   type: array
                   default: ["system:apiserver"]
                   items: { type: string }
+                olmServiceAccounts:
+                  description: OLM identities allowed to DELETE superseded ClusterServiceVersions during operator upgrades (the only controller-driven deletion of a critical kind that is legitimate).
+                  type: array
+                  default: ["system:serviceaccount:openshift-operator-lifecycle-manager:olm-operator-serviceaccount"]
+                  items: { type: string }
                 reaperUsers:
                   description: Identities allowed ONLY to remove expired approval entries (never to add them).
                   type: array
                   default: ["system:serviceaccount:guardrails-system:approval-reaper"]
                   items: { type: string }
-                gitopsServiceAccounts:
-                  description: Identities allowed to mutate critical resources (spec/data) - normally only the Argo CD application controller.
+                gitopsControllers:
+                  description: >-
+                    The GitOps path. Identities whose create/update/delete of critical objects are considered pre-approved
+                    because every change they apply was merged through the repository ruleset (two reviewers, code owners).
+                    Exempt from the two-person rule, from label control and from the GitOps-only policy; their deletions
+                    raise GitOpsCriticalDeletionApplied (warning) instead of the red alert. ONLY the Argo CD application
+                    controller and ApplicationSet controller belong here. Never a human, never argocd-server (UI/CLI actions
+                    are not Git-reviewed).
                   type: array
                   default:
                     - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
-                    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server
                     - system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller
+                  items: { type: string }
+                gitopsServiceAccounts:
+                  description: Trusted MUTATORS (may update critical objects, may add the critical label) but NOT exempt from the deletion rule - argocd-server (UI/CLI sync, refresh), the GitOps operator, External Secrets, Velero.
+                  type: array
+                  default:
+                    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server
                     - system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager
                   items: { type: string }
                 privilegedClusterRoles:

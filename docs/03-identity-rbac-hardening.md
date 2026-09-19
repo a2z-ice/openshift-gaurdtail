@@ -20,19 +20,24 @@ An admission policy decides based on `request.userInfo`. If identities are share
 3. **Remove `kubeadmin`** once an IdP admin login is proven: `oc delete secret kubeadmin -n kube-system`. The `KubeadminOrSystemAdminUsed` alert then catches any reappearance.
 4. **Vault the installer kubeconfig** (`auth/kubeconfig`, identity `system:admin`, bypasses OAuth and RBAC audit attribution beyond the CN). Store it under dual control; every use is a P1 alert.
 5. **No `User` subjects on `cluster-admin`.** Only the `platform-admins` group and the break-glass SA are bound. `scripts/verify-install.sh` counts violations.
-6. **Break-glass is a service account, not a person.** `guardrails-system/breakglass` is bound to `cluster-admin` and listed in `GuardrailConfig.spec.exemptUsers`. Its token is minted on demand by two custodians (`oc create token breakglass -n guardrails-system --duration=1h`), never stored; use raises `BreakGlassUsed`. Procedure in docs/09.
-7. **Impersonation is an incident.** `cluster-admin` can `--as=approver1`; there is no admission-side way to distinguish that. `ImpersonationUsed` (any write via impersonation) is P1 to the security channel and the audit event names both identities, so a forged approval is provable after the fact. Keep `impersonate` out of every custom role.
+6. **Break-glass is a service account, not a person.** `guardrails-system/breakglass` is bound to `cluster-admin` and listed in `GuardrailConfig.spec.exemptUsers`. Only the `breakglass-custodians` group (Role `guardrails-breakglass-custodian`, `create` on `serviceaccounts/token` for that one SA) and JIT cluster-admins can mint its token (`oc create token breakglass -n guardrails-system --duration=1h`); minting raises `PrivilegedTokenMinted`, every use raises `BreakGlassUsed`. Bound tokens cannot be revoked, so the duration is short and the mint is the audited event. Procedure in docs/09.
+7. **Impersonation is an incident.** `cluster-admin` can `--as=approver1` (forged approval) or `--as=system:serviceaccount:guardrails-system:breakglass` / the Argo CD controller (one-command bypass); there is no admission-side way to distinguish that. `ImpersonationUsed` (any write via impersonation) and `PrivilegedIdentityImpersonated` (impersonating an exempt/trusted identity) are P1 to the security channel and the audit event names both identities. This is why JIT `platform-admins` is a hard prerequisite, not a recommendation. Keep `impersonate` out of every custom role. Note: `oc auth can-i --as=...` is a SubjectAccessReview and is excluded from the alert.
 
 ## Why RBAC alone is not enough (and why it is still needed)
 
-RBAC grants verbs on kinds; it cannot say "may patch only these three annotations". So approvers get `patch` on the critical kinds and the **policy** restricts the content of that patch (rule V3/V4 in docs/04: nothing but the guardrail annotations may change in the same request). Conversely the policy does not replace RBAC: it never *grants* anything, it only denies. Both layers must be present.
+RBAC grants verbs on kinds; it cannot say "may patch only these three annotations" and it cannot select objects by label. Two consequences shape `manifests/02-rbac/clusterroles.yaml`:
+
+1. **Scope with what RBAC has**: `resourceNames` for cluster-scoped objects with known names, and namespaced RoleBindings (`rolebindings.yaml`) in the platform namespaces for kinds that cannot be enumerated. Approvers therefore have **no** cluster-wide `patch` or `get` on Secrets, ConfigMaps or Namespaces.
+2. **Two tiers**: *Tier A* kinds are in the workflow (Argo CD CRs, GuardrailConfig, the policies, `guardrails-*` RBAC, the groups, APIServer/OAuth, logging/alerting/backup CRs, the named CronJobs/ConfigMaps). *Tier B* kinds (Namespaces, CRDs, OLM Subscription/CSV/OperatorGroup, Secrets, ServiceAccounts) are never patchable or deletable by a human role, because a spec patch on them is a privilege-escalation primitive (secret contents, conversion webhooks, operator pod specs, PSA labels). They change through Git, or through break-glass.
+
+The **policy** then restricts the content of any patch an approver can make (V3/V4: nothing but the guardrail annotations may change in the same request; the `-hardened` GitOps-only binding denies any other change to the self-protection set in every phase). Conversely the policy does not replace RBAC: it never *grants* anything. Both layers must be present.
 
 ## Argo CD identities
 
 - Argo CD SSO through OpenShift OAuth (Dex, `spec.sso.dex.openShiftOAuth: true`) so Argo CD usernames equal cluster usernames equal audit usernames.
 - Local `admin` account disabled (`spec.disableAdmin: true`).
 - Argo CD RBAC (`spec.rbac.policy`) gives `gitops-operators` sync/refresh/rollback but **`delete: deny`** on applications, applicationsets and projects. Deleting through the Argo CD UI/CLI therefore fails at Argo CD level before it ever reaches the admission policy.
-- The application-controller SA (`system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller`) is the only identity allowed to *mutate* critical objects (`gitopsServiceAccounts`) but it is **not** exempt from the deletion rule.
+- The application-controller and ApplicationSet-controller SAs are the **GitOps path** (`gitopsControllers`): what they apply was merged through the 2-reviewer ruleset, so they are exempt from the cluster-side workflow. `argocd-server` (UI/CLI actions) and the GitOps operator are trusted *mutators* only (`gitopsServiceAccounts`): they may update critical objects but not delete them without the workflow.
 
 ## Manifests
 
@@ -56,4 +61,6 @@ oc get secret kubeadmin -n kube-system 2>&1 | head -1          # NotFound expect
 oc get group gitops-deletion-approvers -o jsonpath='{.users}'  # >= 4 people
 oc auth can-i delete argocd -n openshift-gitops --as=approver1@example.com --as-group=gitops-deletion-approvers   # no
 oc auth can-i patch  argocd -n openshift-gitops --as=approver1@example.com --as-group=gitops-deletion-approvers   # yes (content limited by policy)
+oc auth can-i get secrets -n openshift-gitops --as=approver1@example.com --as-group=gitops-deletion-approvers        # no (Tier B)
+oc auth can-i delete namespaces --as=req@example.com --as-group=gitops-deletion-requesters                          # no (Tier B)
 ```

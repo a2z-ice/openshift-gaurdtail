@@ -10,6 +10,7 @@ description: Respond to a guardrail alert (CriticalResourceDeleted, GitOpsResour
    | Finding | Classification |
    |---|---|
    | `approved=true`, valid change ticket | expected; close with ticket reference |
+   | `gitops=true` (GitOpsCriticalDeletionApplied) with a merged PR that removed the object | expected GitOps path; link the PR. No PR → controller identity compromised: treat as CriticalResourceDeleted + PrivilegedTokenMinted check |
    | `exempt=true` (break-glass) with open incident naming two custodians | expected; verify commands match the incident |
    | `exempt=true` without incident, or impersonation, or `kube:admin`/`system:admin` | **security incident**: revoke tokens (`oc delete useroauthaccesstokens --field-selector=userName=<user>`), remove from IdP groups, page security |
    | delete of a GitOps object with **no** `decision` annotation | policy did not evaluate → check `GuardrailPolicyModified` history and `oc get vapb` immediately |

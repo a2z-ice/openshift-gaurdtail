@@ -13,7 +13,12 @@ Each covers the other's failure mode: stop the forwarder and `AuditLogIngestionS
 
 | Alert | Pipeline | Severity | Channel | Meaning |
 |---|---|---|---|---|
-| `CriticalResourceDeleted` | audit | critical | email + Teams, repeat 30 m | a critical object was deleted (approved or exempt). Verify the approvals; restore if unexpected |
+| `CriticalResourceDeleted` | audit | critical | email + Teams, repeat 30 m | a critical object was deleted **out of band** (workflow-approved or exempt). Verify the approvals; restore if unexpected |
+| `GitOpsCriticalDeletionApplied` | audit | warning | Teams | Argo CD pruned a critical object from Git; must correlate with a merged PR |
+| `CriticalDeleteWouldBeDenied` | audit | warning | Teams | phase 1/2 only: the request succeeded but would be denied in phase 3 (rollout signal) |
+| `ArgoCDCredentialSecretDeleted` | audit | critical | email + Teams | a Secret in openshift-gitops was deleted by a non-system identity (Tier B: only JIT admin or break-glass can) |
+| `PrivilegedIdentityImpersonated` | audit | critical | security | someone impersonated break-glass or an Argo CD controller (the one-command bypass) |
+| `PrivilegedTokenMinted` | audit | critical | security | a token was minted for break-glass, the reaper or an Argo CD SA |
 | `GitOpsResourceDeleted` | audit | critical | email + Teams | name-based fallback for GitOps namespaces/kinds, independent of the policy |
 | `CriticalResourceDeleteDenied` | audit | warning | Teams | blocked attempt; who and what |
 | `CriticalDeletionApprovalRecorded` | audit | info | Teams (batched) | request/approval activity; expected during a planned deletion |
@@ -31,6 +36,8 @@ Each covers the other's failure mode: stop the forwarder and `AuditLogIngestionS
 | `GuardrailApplicationOutOfSyncOrMissing` | metrics | warning | Teams | self-heal not working |
 | `AuditLogIngestionStalled` / `AuditForwarderNotReady` / `LokiRulerDown` | metrics | critical/warning | email + Teams | detection pipeline health |
 | `GuardrailReaperFailing` | metrics | warning | Teams | TTL enforcement not running |
+| `GuardrailPolicyEvaluationErrors` / `GuardrailPolicyNotEvaluating` / `GuardrailPolicySlow` | metrics | critical/warning | email + Teams | kube-apiserver VAP metrics: CEL errors, cost-budget exhaustion, policy missing, slow |
+| `GuardrailNotificationFailing` / `GuardrailAlertmanagerConfigInvalid` | metrics | critical | email + Teams | Teams/SMTP delivery failing or Alertmanager config not loading |
 
 Every alert carries `guardrail="true"`, `severity`, `team`, a `summary`, a `description` with actor/object, and a `runbook_url` into docs/09.
 
@@ -43,7 +50,7 @@ route guardrail="true" & severity="info"      → receiver guardrail-teams-only 
 route guardrail="true"                        → receiver default (your existing on-call path, so nothing is lost if Teams/SMTP fail)
 ```
 
-Inhibition: a confirmed `CriticalResourceDeleted` silences `CriticalResourceDeleteDenied` for the same object; critical silences warning for the same alertname/namespace.
+Inhibition: a confirmed `CriticalResourceDeleted` silences `CriticalResourceDeleteDenied` for the same object.
 
 Receivers: `guardrail-red` = `email_configs` (HTML template, `X-Priority: 1`) + `msteamsv2_configs`; `guardrail-teams-only` = Teams only. Templates live in the `guardrail.tmpl` key of the same secret and are referenced as `/etc/alertmanager/config/guardrail.tmpl` (the Prometheus Operator mounts every key of `alertmanager-main` there).
 
@@ -92,7 +99,7 @@ If your organisation forbids editing the platform Alertmanager, `alertmanagercon
 
 - `tenantID: audit`; namespace `openshift-logging` (must be labelled `openshift.io/cluster-monitoring=true`); object labelled `openshift.io/log-alerting=true` to match the LokiStack `rules.selector`.
 - In `openshift-logging` tenant mode the Loki Operator wires the ruler to the platform Alertmanager automatically (`RulerConfig` only needed for a non-default Alertmanager).
-- Rules use `count_over_time(... [2m]) > 0`, `interval: 30s`, `for: 0s` → worst-case detection latency ≈ 30 s + ingestion (~5–10 s).
+- Rules use `count_over_time(... [2m]) > 0`, `interval: 30s`, `for: 0s` → worst-case detection latency ≈ 30 s + ingestion (~5–10 s). Rules on writes filter `objectRef_subresource=""` so controller status updates never page, and every rule excludes the known system identities (Argo CD SAs, kube-system controllers, logging operators, group sync).
 - Field names come from Loki's `json` parser (see docs/02). After a Logging major upgrade re-run `scripts/test-guardrails.sh` to prove the rules still match.
 
 ## Verification

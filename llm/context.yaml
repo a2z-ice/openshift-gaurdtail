@@ -1,6 +1,6 @@
 # Machine-readable facts for AI tools. Single source; AGENTS.md is the prose twin. Keep both in sync.
 repo:
-  purpose: OpenShift 4.21 audit trail + two-person deletion guardrail (ValidatingAdmissionPolicy) + email/Teams alerting + backups
+  purpose: OpenShift 4.21 audit trail + two-person rule for OUT-OF-BAND deletion of critical resources (ValidatingAdmissionPolicy) + email/Teams alerting + backups. GitOps path (Argo CD controllers applying merged PRs) is pre-approved and exempt.
   entrypoints: [AGENTS.md, llm/memory.md, .claude/skills/]
   validate: ["for o in manifests/base manifests/overlays/*; do kustomize build \"$o\" >/dev/null; done", "yamllint -c .yamllint manifests", "bash -n scripts/*.sh"]
 platform:
@@ -21,12 +21,17 @@ guardrail:
   executor_may_be_approver: false
   approval_ttl: 4h
   exempt_users: [system:apiserver, system:serviceaccount:guardrails-system:breakglass]
-  gitops_service_accounts: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller, system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server, system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller, system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager]
+  gitops_controllers_exempt: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller, system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller]
+  gitops_service_accounts_trusted_mutators: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server, system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager]
+  olm_service_accounts_may_delete_csv: [system:serviceaccount:openshift-operator-lifecycle-manager:olm-operator-serviceaccount]
+  rbac_tiers:
+    tier_a_workflow: [argocds, applications, applicationsets, appprojects, guardrailconfigs, validatingadmissionpolicies, validatingadmissionpolicybindings, guardrails-* cluster RBAC, groups, apiservers, oauths, lokistacks, alertingrules, clusterlogforwarders, prometheusrules, schedules, dataprotectionapplications, named cronjobs/configmaps]
+    tier_b_breakglass_or_git_only: [namespaces, customresourcedefinitions, subscriptions, clusterserviceversions, operatorgroups, secrets, serviceaccounts]
   reaper: { cronjob: guardrails-system/approval-reaper, may: remove-only, also_removes: future-dated or invalid timestamps }
   policies:
     - { name: guardrails-critical-delete, bindings: [guardrails-critical-delete-labelled, guardrails-critical-delete-named], rules: [V1 delete, V2 label, V3 approvals, V4 request] }
     - { name: guardrails-critical-label-control, bindings: [guardrails-critical-label-control], rule: only trusted identities may add the critical label }
-    - { name: guardrails-gitops-only-mutation, bindings: [guardrails-gitops-only-mutation] }
+    - { name: guardrails-gitops-only-mutation, bindings: [guardrails-gitops-only-mutation, guardrails-gitops-only-mutation-hardened], hardened_is_deny_in_all_phases: true }
     - { name: guardrails-rbac-escalation-audit, bindings: [guardrails-rbac-escalation-audit], never_denies: true }
   name_protected:
     namespaces: [openshift-gitops, openshift-gitops-operator, guardrails-system, openshift-logging, openshift-adp]
@@ -48,7 +53,7 @@ phase_selector: 'spec.source.path of Application openshift-gitops/guardrails (ch
 alerts:
   label: guardrail=true
   critical_route: { receivers: [email, msteamsv2], group_wait: 0s, repeat: 30m }
-  key_alerts: [CriticalResourceDeleted, GitOpsResourceDeleted, CriticalResourceDeleteDenied, GuardrailPolicyModified, AuditProfileChanged, PrivilegedRBACChange, ImpersonationUsed, BreakGlassUsed, KubeadminOrSystemAdminUsed, ArgoCDApplicationControllerMissing, GitOpsNamespaceTerminating, AuditLogIngestionStalled]
+  key_alerts: [CriticalResourceDeleted, GitOpsCriticalDeletionApplied, GitOpsResourceDeleted, CriticalResourceDeleteDenied, CriticalDeleteWouldBeDenied, ArgoCDCredentialSecretDeleted, GuardrailPolicyModified, AuditProfileChanged, PrivilegedRBACChange, ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted, BreakGlassUsed, KubeadminOrSystemAdminUsed, ArgoCDApplicationControllerMissing, GitOpsNamespaceTerminating, AuditLogIngestionStalled, GuardrailPolicyEvaluationErrors, GuardrailNotificationFailing]
 audit:
   profile: WriteRequestBodies
   loki_tenant: audit
@@ -63,10 +68,10 @@ scripts:
   test: scripts/test-guardrails.sh
   audit_query: scripts/audit-query.sh <name>
 never:
-  - add a human to exemptUsers
+  - add a human to exemptUsers or gitopsControllers; never argocd-server in gitopsControllers
   - minApprovers < 2 or executorMayBeApprover true
   - remove Deny from phase-3/4 bindings
-  - resources-finalizer or prune=true on the guardrails Application
+  - resources-finalizer on the guardrails Application (prune=true is correct: Git is the source of truth)
   - impersonation, kubeadmin, system:admin or break-glass to pass a deletion
   - secrets in Git
   - hand-apply manifests outside phase-1 bootstrap / break-glass

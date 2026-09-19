@@ -34,9 +34,10 @@ spec:
             sum by (user_username, impersonatedUser_username, objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster) (
               count_over_time(
                 {log_type="audit"} | json
-                | verb="delete"
+                | verb=~"delete|deletecollection"
                 | responseStatus_code >= 200 and responseStatus_code < 300
                 | annotations_guardrails_critical_delete_decision =~ ".+"
+                | annotations_guardrails_critical_delete_decision !~ ".*gitops=true.*"
               [2m])
             ) > 0
           for: 0s
@@ -45,20 +46,41 @@ spec:
             guardrail: "true"
             team: platform-engineering
           annotations:
-            summary: "RED ALERT: critical resource DELETED - {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            summary: "RED ALERT: critical resource DELETED out of band - {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
             description: >-
               {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} was deleted by
               {{ $labels.user_username }}{{ if $labels.impersonatedUser_username }} (impersonating {{ $labels.impersonatedUser_username }}){{ end }}
               on cluster {{ $labels.openshift_labels_cluster }}. Deletion passed the two-person rule or came from an exempt identity.
               Verify the approvals in the audit trail and start the restore runbook if this was not expected.
             runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#respond-to-a-red-alert
+        - alert: GitOpsCriticalDeletionApplied
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"delete|deletecollection"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | annotations_guardrails_critical_delete_decision =~ ".*gitops=true.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Git-driven deletion of critical {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} (Argo CD prune)"
+            description: "Applied by {{ $labels.user_username }} from Git. Correlate with the merged PR (git log -S '{{ $labels.objectRef_name }}'); if no PR removed it, the controller identity is compromised: treat as CriticalResourceDeleted."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#git-driven-deletion
         - alert: GitOpsResourceDeleted
           expr: |
             sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
               count_over_time(
                 {log_type="audit"} | json
-                | verb="delete"
+                | verb=~"delete|deletecollection"
                 | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_subresource=""
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-operator-lifecycle-manager:.*|system:serviceaccount:kube-system:.*"
                 | (objectRef_namespace =~ "openshift-gitops|openshift-gitops-operator|guardrails-system"
                    or objectRef_resource =~ "argocds|customresourcedefinitions|validatingadmissionpolicies|validatingadmissionpolicybindings|guardrailconfigs|clusterlogforwarders|lokistacks"
                    or objectRef_name =~ "openshift-gitops|openshift-gitops-operator|guardrails-system")
@@ -79,7 +101,7 @@ spec:
             sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
               count_over_time(
                 {log_type="audit"} | json
-                | verb="delete"
+                | verb=~"delete|deletecollection"
                 | responseStatus_code >= 400
                 | annotations_validation_policy_admission_k8s_io_validation_failure =~ ".*guardrails-critical-delete.*"
               [2m])
@@ -93,6 +115,24 @@ spec:
             summary: "Deletion of critical {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} was BLOCKED"
             description: "{{ $labels.user_username }} attempted to delete a critical resource without the required approvals. Blocked by the admission guardrail. If this was Argo CD, a manifest was removed from Git - review the PR."
             runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#deletion-denied
+        - alert: CriticalDeleteWouldBeDenied
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"delete|deletecollection"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | annotations_validation_policy_admission_k8s_io_validation_failure =~ ".*guardrails-critical-delete.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Phase 1/2: deletion of critical {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }} WOULD have been denied"
+            description: "The request succeeded because the binding is in Audit/Warn mode. This is the rollout signal: every occurrence must map to a workflow adoption or an identity added via PR before phase 3."
         - alert: CriticalDeletionApprovalRecorded
           expr: |
             sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
@@ -101,7 +141,7 @@ spec:
                 | verb=~"patch|update"
                 | responseStatus_code >= 200 and responseStatus_code < 300
                 | annotations_guardrails_critical_delete_decision =~ ".+"
-                | requestObject_metadata_annotations_guardrails_example_com_delete_approvals =~ ".+"
+                | (requestObject_metadata_annotations_guardrails_example_com_delete_approvals =~ ".+" or requestObject_metadata_annotations_guardrails_example_com_delete_request =~ ".+")
               [2m])
             ) > 0
           for: 0s
@@ -112,6 +152,25 @@ spec:
           annotations:
             summary: "Deletion approval activity on {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
             description: "A deletion request/approval annotation changed. Expected during a planned deletion; investigate if no change ticket exists."
+        - alert: ArgoCDCredentialSecretDeleted
+          expr: |
+            sum by (user_username, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"delete|deletecollection"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_resource="secrets" | objectRef_namespace="openshift-gitops"
+                | user_username !~ "system:serviceaccount:kube-system:.*|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Secret {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} deleted by {{ $labels.user_username }} (Argo CD repo/cluster credentials live here)"
+            description: "Secrets are Tier B (break-glass) objects: no workflow role can delete them, so a human deletion here is either JIT cluster-admin or break-glass. Confirm the incident; re-sync from the vault/ESO."
     - name: guardrails.integrity
       interval: 30s
       rules:
@@ -122,9 +181,11 @@ spec:
                 {log_type="audit"} | json
                 | verb=~"create|update|patch|delete"
                 | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_subresource=""
                 | (objectRef_resource =~ "validatingadmissionpolicies|validatingadmissionpolicybindings|guardrailconfigs"
-                   or (objectRef_resource =~ "clusterroles|clusterrolebindings|cronjobs|configmaps" and objectRef_name =~ "guardrails-.*|approval-reaper"))
-                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:apiserver"
+                   or (objectRef_resource =~ "clusterroles|clusterrolebindings|roles|rolebindings|cronjobs|configmaps|networkpolicies" and objectRef_name =~ "guardrails-.*|approval-reaper|default-deny-all|allow-egress-dns-and-apiserver")
+                   or (objectRef_resource = "groups" and objectRef_name =~ "platform-admins|gitops-deletion-approvers|gitops-deletion-requesters|breakglass-custodians"))
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager|system:apiserver|system:serviceaccount:kube-system:.*|system:serviceaccount:guardrails-system:ldap-group-sync"
               [2m])
             ) > 0
           for: 0s
@@ -143,8 +204,8 @@ spec:
                 {log_type="audit"} | json
                 | verb=~"update|patch"
                 | responseStatus_code >= 200 and responseStatus_code < 300
-                | objectRef_resource="apiservers" | objectRef_name="cluster"
-                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller"
+                | objectRef_resource="apiservers" | objectRef_name="cluster" | objectRef_subresource=""
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager"
               [2m])
             ) > 0
           for: 0s
@@ -162,8 +223,8 @@ spec:
                 {log_type="audit"} | json
                 | verb=~"update|patch|delete"
                 | responseStatus_code >= 200 and responseStatus_code < 300
-                | objectRef_resource =~ "clusterlogforwarders|lokistacks|alertingrules"
-                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-logging:.*|system:serviceaccount:openshift-operators-redhat:.*"
+                | objectRef_resource =~ "clusterlogforwarders|lokistacks|alertingrules" | objectRef_subresource=""
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager|system:serviceaccount:openshift-logging:.*|system:serviceaccount:openshift-operators-redhat:.*"
               [2m])
             ) > 0
           for: 0s
@@ -185,7 +246,7 @@ spec:
                 | verb=~"create|update|patch|delete"
                 | responseStatus_code >= 200 and responseStatus_code < 300
                 | annotations_guardrails_rbac_escalation_audit_privileged_change =~ ".+"
-                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-authentication:.*"
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager|system:serviceaccount:openshift-authentication:.*|system:serviceaccount:guardrails-system:ldap-group-sync"
               [2m])
             ) > 0
           for: 0s
@@ -203,6 +264,7 @@ spec:
                 {log_type="audit"} | json
                 | impersonatedUser_username =~ ".+"
                 | verb !~ "get|list|watch"
+                | objectRef_resource !~ "subjectaccessreviews|selfsubjectaccessreviews|selfsubjectrulesreviews|localsubjectaccessreviews"
               [2m])
             ) > 0
           for: 0s
@@ -213,6 +275,41 @@ spec:
           annotations:
             summary: "{{ $labels.user_username }} impersonated {{ $labels.impersonatedUser_username }} for a write ({{ $labels.verb }} {{ $labels.objectRef_resource }})"
             description: "Impersonating an approver is the primary way to forge an approval. Any write via impersonation is treated as an incident."
+        - alert: PrivilegedIdentityImpersonated
+          expr: |
+            sum by (user_username, impersonatedUser_username, verb, objectRef_resource, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | impersonatedUser_username =~ "system:serviceaccount:guardrails-system:.*|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server|system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller|system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager|system:admin"
+                | verb !~ "get|list|watch"
+              [1m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "BYPASS ATTEMPT: {{ $labels.user_username }} impersonated the exempt/trusted identity {{ $labels.impersonatedUser_username }} ({{ $labels.verb }} {{ $labels.objectRef_resource }}/{{ $labels.objectRef_name }})"
+            description: "Impersonating break-glass or an Argo CD service account makes the caller exempt or trusted in admission. This is the one-command bypass that only JIT cluster-admin hygiene prevents; treat as a confirmed security incident."
+        - alert: PrivilegedTokenMinted
+          expr: |
+            sum by (user_username, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb="create" | objectRef_resource="serviceaccounts" | objectRef_subresource="token"
+                | objectRef_name =~ "breakglass|approval-reaper|openshift-gitops-argocd-application-controller|openshift-gitops-argocd-server|openshift-gitops-applicationset-controller|openshift-gitops-operator-controller-manager|ldap-group-sync|etcd-backup"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+              [1m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "Token minted for privileged SA {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
+            description: "A break-glass mint must have an open incident with two custodians; a mint for an Argo CD/reaper SA by a human is a bypass attempt. Bound tokens cannot be revoked: contain by removing the actor's access and watching BreakGlassUsed/ArgoCDDirectMutation."
         - alert: BreakGlassUsed
           expr: |
             sum by (verb, objectRef_resource, objectRef_namespace, objectRef_name) (
@@ -269,7 +366,7 @@ spec:
                 {log_type="audit"} | json
                 | verb="create"
                 | objectRef_subresource =~ "exec|attach|debug"
-                | objectRef_namespace =~ "openshift-etcd|openshift-kube-apiserver|openshift-debug-.*|default"
+                | objectRef_namespace =~ "openshift-etcd|openshift-kube-apiserver|openshift-debug-.*|default|openshift-gitops|openshift-gitops-operator|guardrails-system|openshift-logging|openshift-etcd-backup"
                 | user_username !~ "system:serviceaccount:.*"
               [2m])
             ) > 0

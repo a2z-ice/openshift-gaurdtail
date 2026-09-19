@@ -38,9 +38,6 @@ stringData:
     templates:
       - /etc/alertmanager/config/guardrail.tmpl
     inhibit_rules:
-      - source_matchers: [severity="critical"]
-        target_matchers: [severity="warning"]
-        equal: [alertname, namespace]
       # a confirmed deletion supersedes the "denied" noise from the same object
       - source_matchers: [alertname="CriticalResourceDeleted"]
         target_matchers: [alertname="CriticalResourceDeleteDenied"]
@@ -81,6 +78,7 @@ stringData:
           group_wait: 1m
           group_interval: 10m
           repeat_interval: 24h
+          continue: true
         # ---- also copy every guardrail alert to the normal on-call path so nothing is lost if Teams is down
         - matchers:
             - guardrail="true"

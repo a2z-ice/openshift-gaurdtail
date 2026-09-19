@@ -23,7 +23,7 @@ spec:
       - openshift-gitops
       - openshift-gitops-operator
       - guardrails-system
-    includeClusterResources: true
+    # includeClusterResources omitted on purpose: nil = cluster-scoped resources RELATED to these namespaces only
     snapshotVolumes: false       # Argo CD state is in Git + CRs; redis is a cache
     defaultVolumesToFsBackup: false
     excludedResources:

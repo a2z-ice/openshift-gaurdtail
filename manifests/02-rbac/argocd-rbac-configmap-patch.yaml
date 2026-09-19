@@ -21,11 +21,15 @@ data:
     p, role:operator, applications, get,      */*, allow
     p, role:operator, applications, sync,     */*, allow
     p, role:operator, applications, action/*, */*, allow
-    p, role:operator, applications, override, */*, allow
+    p, role:operator, applications, override, */*, deny
     p, role:operator, applications, update,   */*, allow
+    p, role:operator, applications, update,   guardrails/*, deny
+    p, role:operator, applications, create,   guardrails/*, deny
     p, role:operator, applications, create,   */*, allow
     p, role:operator, applications, delete,   */*, deny
-    p, role:operator, applicationsets, *,     */*, allow
+    p, role:operator, applicationsets, get,   */*, allow
+    p, role:operator, applicationsets, create,*/*, deny
+    p, role:operator, applicationsets, update,*/*, deny
     p, role:operator, applicationsets, delete,*/*, deny
     p, role:operator, projects, get,          *,   allow
     p, role:operator, projects, delete,       *,   deny

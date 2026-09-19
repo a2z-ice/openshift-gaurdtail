@@ -7,7 +7,6 @@
 #   spec.rbac           : Argo CD-level RBAC (default readonly; operators cannot delete apps/projects)
 #   spec.sso            : OIDC via the OpenShift OAuth (Dex) so Argo CD identities == cluster identities == audit identities
 #   spec.disableAdmin   : no local 'admin' account (no un-audited shared password)
-#   spec.resourceExclusions: Argo CD never manages/prunes the guardrail policy kinds by accident from unrelated apps
 #   spec.server.insecure=false + route TLS reencrypt
 #   labels/annotations  : marks the instance critical (deletion requires the two-person rule)
 # ---------------------------------------------------------------------------
@@ -35,11 +34,15 @@ spec:
       p, role:operator, applications, get,      */*, allow
       p, role:operator, applications, sync,     */*, allow
       p, role:operator, applications, action/*, */*, allow
-      p, role:operator, applications, override, */*, allow
+      p, role:operator, applications, override, */*, deny
       p, role:operator, applications, update,   */*, allow
+      p, role:operator, applications, update,   guardrails/*, deny
+      p, role:operator, applications, create,   guardrails/*, deny
       p, role:operator, applications, create,   */*, allow
       p, role:operator, applications, delete,   */*, deny
-      p, role:operator, applicationsets, *,     */*, allow
+      p, role:operator, applicationsets, get,   */*, allow
+      p, role:operator, applicationsets, create,*/*, deny
+      p, role:operator, applicationsets, update,*/*, deny
       p, role:operator, applicationsets, delete,*/*, deny
       p, role:operator, projects, get,          *,   allow
       p, role:operator, projects, delete,       *,   deny
@@ -56,15 +59,16 @@ spec:
       tls:
         termination: reencrypt
         insecureEdgeTerminationPolicy: Redirect
-  # Never let an unrelated Application take ownership of (and later prune) guardrail objects.
-  resourceExclusions: |
-    - apiGroups: ["guardrails.example.com"]
-      kinds: ["*"]
-      clusters: ["*"]
+  # (resourceExclusions for guardrails.example.com deliberately NOT set: it would also stop the guardrails
+  #  Application from managing GuardrailConfig. Cross-project adoption is prevented by the AppProject whitelists
+  #  and annotation-based resource tracking.)
+  controller:
+    env:
+      - name: ARGOCD_CONTROLLER_DIFF_SERVER_SIDE      # server-side diff so human-added approval annotations are not drift
+        value: "true"
   # Keep the last 10 revisions of every Application for forensic diffs.
   extraConfig:
     application.resourceTrackingMethod: annotation
-    controller.diff.server.side: "true"
     resource.customizations.ignoreDifferences.all: |
       jsonPointers:
         - /metadata/annotations/guardrails.example.com~1delete-request

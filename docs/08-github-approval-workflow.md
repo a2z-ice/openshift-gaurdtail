@@ -2,7 +2,7 @@
 
 ## Why
 
-The cluster-side guardrail assumes the manifests in `main` are trustworthy. A single person who can merge to `main` could remove a label, add themselves to `exemptUsers` or flip `validationActions` to `[]`, and Argo CD would apply it. The repository therefore needs the same two-person property as the cluster.
+In this design the repository ruleset **is** the approval for every change that flows through Git: the Argo CD controllers that apply merged commits are exempt from the cluster-side workflow. The repository therefore needs the two-person property, no bypass actors, and CI invariants that reject weakening, because a merged PR is authoritative on the cluster.
 
 ## Controls
 

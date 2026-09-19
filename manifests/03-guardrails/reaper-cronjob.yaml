@@ -26,31 +26,19 @@ metadata:
 rules:
   - apiGroups: ["guardrails.example.com"]
     resources: ["guardrailconfigs"]
-    verbs: ["get", "list"]
-  # get/list/patch (NO delete, NO create) on every protected kind
+    verbs: ["get", "list", "patch"]
+  # get/list/patch (NO delete, NO create) on the Tier-A kinds where approvals are recorded.
+  # Deliberately NOT: secrets, serviceaccounts, namespaces, CRDs, OLM objects, groups, cluster RBAC,
+  # apiservers/oauths, VAP/VAPB. A stolen reaper token must not be able to read secrets or touch privileged
+  # objects; approvals on those kinds (rare) are cleared by hand when stale.
   - apiGroups: [""]
-    resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
+    resources: ["configmaps"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["argoproj.io"]
     resources: ["argocds", "applications", "applicationsets", "appprojects"]
     verbs: ["get", "list", "patch"]
-  - apiGroups: ["operators.coreos.com"]
-    resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
-    verbs: ["get", "list", "patch"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "patch"]
-  - apiGroups: ["admissionregistration.k8s.io"]
-    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
-    verbs: ["get", "list", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings"]
-    verbs: ["get", "list", "patch"]
-  - apiGroups: ["user.openshift.io"]
-    resources: ["groups"]
-    verbs: ["get", "list", "patch"]
-  - apiGroups: ["config.openshift.io"]
-    resources: ["apiservers", "oauths"]
+    resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["loki.grafana.com"]
     resources: ["lokistacks", "alertingrules", "rulerconfigs"]
@@ -69,6 +57,9 @@ rules:
     verbs: ["get", "list", "patch"]
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
     verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -98,32 +89,26 @@ metadata:
 data:
   # group/version/resource list the reaper scans (cluster-wide)
   resources.txt: |
-    v1/namespaces
-    v1/secrets
+    # Tier-A kinds only (see 02-rbac/clusterroles.yaml). Kinds whose CRD is absent are skipped.
     v1/configmaps
-    v1/serviceaccounts
+    guardrails.example.com/v1alpha1/guardrailconfigs
     argoproj.io/v1beta1/argocds
     argoproj.io/v1alpha1/applications
     argoproj.io/v1alpha1/applicationsets
     argoproj.io/v1alpha1/appprojects
-    operators.coreos.com/v1alpha1/subscriptions
-    operators.coreos.com/v1alpha1/clusterserviceversions
-    operators.coreos.com/v1/operatorgroups
-    apiextensions.k8s.io/v1/customresourcedefinitions
-    admissionregistration.k8s.io/v1/validatingadmissionpolicies
-    admissionregistration.k8s.io/v1/validatingadmissionpolicybindings
-    rbac.authorization.k8s.io/v1/clusterroles
-    rbac.authorization.k8s.io/v1/clusterrolebindings
-    user.openshift.io/v1/groups
-    config.openshift.io/v1/apiservers
+    rbac.authorization.k8s.io/v1/roles
+    rbac.authorization.k8s.io/v1/rolebindings
     loki.grafana.com/v1/lokistacks
     loki.grafana.com/v1/alertingrules
+    loki.grafana.com/v1/rulerconfigs
     observability.openshift.io/v1/clusterlogforwarders
     monitoring.coreos.com/v1/prometheusrules
+    monitoring.coreos.com/v1alpha1/alertmanagerconfigs
     velero.io/v1/schedules
     velero.io/v1/backupstoragelocations
     oadp.openshift.io/v1alpha1/dataprotectionapplications
     batch/v1/cronjobs
+    networking.k8s.io/v1/networkpolicies
   reap.sh: |
     #!/usr/bin/env bash
     # Removes approval entries older than GuardrailConfig.spec.approvalTTL.
@@ -137,16 +122,17 @@ data:
       *)  echo "unparseable approvalTTL '$TTL_RAW'"; exit 1 ;;
     esac
     NOW=$(date -u +%s)
+    export HOME=/tmp
     echo "reaper start ttl=${TTL_RAW} (${TTL_SEC}s) now=$(date -u -Is)"
     while read -r GVR; do
       [[ -z "$GVR" || "$GVR" == \#* ]] && continue
       # oc get accepts <resource>.<version>.<group>; core group has no group part
       IFS='/' read -r -a P <<< "$GVR"
       if [[ ${#P[@]} -eq 2 ]]; then RES="${P[1]}"; else RES="${P[2]}.${P[1]}.${P[0]}"; fi
-      # objects that carry the annotation: "<ns>|<name>|<annotation>"
-      oc get "$RES" --all-namespaces --ignore-not-found \
-        -o go-template='{{range .items}}{{$item := .}}{{with .metadata.annotations}}{{if index . "guardrails.example.com/delete-approvals"}}{{with $item.metadata.namespace}}{{.}}{{end}}|{{$item.metadata.name}}|{{index . "guardrails.example.com/delete-approvals"}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null \
-      | while IFS='|' read -r NS NAME RAW; do
+      # objects that carry the annotation: "<ns>|<name>|<resourceVersion>|<annotation>"; a missing CRD is skipped, not fatal
+      { oc get "$RES" --all-namespaces --ignore-not-found \
+          -o go-template='{{range .items}}{{$item := .}}{{with .metadata.annotations}}{{if index . "guardrails.example.com/delete-approvals"}}{{with $item.metadata.namespace}}{{.}}{{end}}|{{$item.metadata.name}}|{{$item.metadata.resourceVersion}}|{{index . "guardrails.example.com/delete-approvals"}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null || true; } \
+      | while IFS='|' read -r NS NAME RV RAW; do
           [[ -z "$NAME" ]] && continue
           KEEP=""
           IFS=',' read -r -a ENTRIES <<< "$RAW"
@@ -163,10 +149,11 @@ data:
           done
           if [[ "$KEEP" != "$RAW" ]]; then
             NSARG=(); [[ -n "$NS" ]] && NSARG=(-n "$NS")
+            # --resource-version: never overwrite a concurrent fresh approval (conflict -> retried next run)
             if [[ -z "$KEEP" ]]; then
-              oc annotate "${NSARG[@]}" "$RES" "$NAME" "${ANN}-" --overwrite
+              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}-" --overwrite --resource-version="$RV" || echo "conflict on ${NS:-<cluster>}/${NAME}; will retry"
             else
-              oc annotate "${NSARG[@]}" "$RES" "$NAME" "${ANN}=${KEEP}" --overwrite
+              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}=${KEEP}" --overwrite --resource-version="$RV" || echo "conflict on ${NS:-<cluster>}/${NAME}; will retry"
             fi
           fi
         done

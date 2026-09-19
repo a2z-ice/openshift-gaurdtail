@@ -5,13 +5,22 @@ Production-grade controls for an OpenShift Container Platform 4.21 cluster that 
 | Requirement | How it is met | Where |
 |---|---|---|
 | Every edit and deletion is attributable (who, what, when, from where) | API-server audit profile `WriteRequestBodies`, forwarded to the SIEM (system of record) **and** to an in-cluster LokiStack (for alerting), 90-day in-cluster retention, object-locked buckets | [docs/02](docs/02-audit-logging.md), `manifests/01-audit` |
-| No single person, **including cluster-admin**, can delete a critical resource | `ValidatingAdmissionPolicy` inside kube-apiserver enforces a two-person rule: a deletion request plus ≥ 2 distinct approvals from a named group, executor ≠ approver. No webhook, no operator, nothing to bypass by disabling a pod | [docs/04](docs/04-deletion-guardrails.md), `manifests/03-guardrails` |
-| Argo CD itself cannot be removed by one authorised user | The `ArgoCD` CR, its namespace, operator Subscription/CSV, CRDs, AppProjects and Applications are all "critical". Argo CD's own service account is **not** exempt, so removing a manifest from Git cannot delete them either | [docs/05](docs/05-argocd-protection.md), `manifests/04-argocd` |
+| No single person, **including cluster-admin**, can delete a critical resource **out of band** | `ValidatingAdmissionPolicy` inside kube-apiserver enforces a two-person rule for any direct API deletion: request + ≥ 2 distinct approvals + executor ≠ approver. Changes merged through Git (2 reviewers) and applied by the Argo CD controllers are the pre-approved GitOps path | [docs/04](docs/04-deletion-guardrails.md), `manifests/03-guardrails` |
+| Argo CD itself cannot be removed by one authorised user | The `ArgoCD` CR, its namespace, operator Subscription/CSV, CRDs, AppProjects and Applications are all "critical": any direct deletion (oc, console, Argo CD UI) needs the workflow. Removal through Git needs the 2-reviewer PR and is alerted | [docs/05](docs/05-argocd-protection.md), `manifests/04-argocd` |
 | Any deletion (or attempt) raises a red alert to **email and Microsoft Teams** within seconds | Loki `AlertingRule`s on the audit stream + metrics-based `PrometheusRule`s (second, audit-independent channel) → Alertmanager 0.29 with `email_configs` + `msteamsv2_configs` (Teams Workflows), `group_wait: 0s` | [docs/06](docs/06-alerting-and-notifications.md), `manifests/05-alerting` |
 | Still recoverable if everything else fails | OADP schedules (6-hourly) + Git as source of truth + cold-start runbook | [docs/07](docs/07-backup-and-recovery.md), `manifests/06-backup` |
-| The guardrails cannot be quietly switched off | Policy objects are themselves critical, RBAC-locked, self-healed by Argo CD, and every write to them is a P1 alert. Git side: 2 reviewers + CODEOWNERS, no bypass | [docs/04 §self-protection](docs/04-deletion-guardrails.md#self-protection), [docs/08](docs/08-github-approval-workflow.md) |
+| The guardrails cannot be quietly switched off | Policy objects are themselves critical, GitOps-only in **every** phase (hardened binding), RBAC-scoped with `resourceNames`, self-healed by Argo CD, and every out-of-band write to them is a P1 alert. Git side: 2 reviewers + CODEOWNERS, no bypass | [docs/04 §self-protection](docs/04-deletion-guardrails.md#self-protection), [docs/08](docs/08-github-approval-workflow.md) |
 
 Verified against: OCP 4.21 (Kubernetes 1.34, Alertmanager 0.29.0, Prometheus 3.7), OpenShift GitOps 1.19+, OpenShift Logging 6.x (`observability.openshift.io/v1`), Loki Operator 6.x, OADP 1.5.
+
+## Trust model (read this first)
+
+| Path | Who acts on the cluster | Approval | Cluster-side control |
+|---|---|---|---|
+| **GitOps path** | Argo CD application-controller / ApplicationSet controller applying a merged commit | the repository ruleset: 2 reviewers + code owners (`docs/08`) | **exempt** from the two-person rule (`GuardrailConfig.spec.gitopsControllers`); every Git-driven deletion of a critical object is still alerted as `GitOpsCriticalDeletionApplied` for PR correlation |
+| **Out-of-band path** | humans with `oc`/console, Argo CD UI/CLI (acts as `argocd-server`, not Git-reviewed), any other controller, break-glass | the two-person rule on the cluster: request + 2 approvers + executor | `guardrails-critical-delete` (Deny in phase ≥ 3), label control, GitOps-only mutation for the self-protection set (Deny in every phase) |
+
+Create/update/delete through Git needs no extra approval on the cluster. The same operation done directly against the API on a critical object needs the workflow, whoever the actor is, including cluster-admin.
 
 ## Architecture
 
@@ -33,7 +42,7 @@ flowchart TB
     end
     Users["Humans and CI<br/>oc or console"] --> RBAC
     IdP -.-> Users
-    ArgoCD -- "applies, SA is not exempt" --> RBAC
+    ArgoCD -- "applies: GitOps path, pre-approved by the PR ruleset" --> RBAC
     Audit --> Vector["Vector collector<br/>ClusterLogForwarder"]
     Vector --> SIEM[("Splunk or Elastic<br/>system of record, WORM")]
     Vector --> Loki[("LokiStack audit tenant<br/>90 days")]
@@ -136,4 +145,6 @@ Any LLM tool can operate this repository with a few hundred tokens of context:
 | 12 | [Operations & compliance](docs/12-operations-and-compliance.md) | recurring reviews, control mapping |
 | 13 | [Solution justification](docs/13-solution-justification.md) | presenting the design to an architecture/security review board |
 | 14 | [Manual test guide](docs/14-manual-test-guide.md) | step-by-step positive and negative tests with expected output |
+| 15 | [Implementation guide](docs/15-implementation-guide.md) | the ordered, step-by-step rollout with verification, rollback and a tracking table |
+| 16 | [Production readiness review](docs/16-production-readiness-review.md) | independent audit findings, what was fixed, and the 100 % test traceability matrix |
 | – | [Study guide (HTML)](html/study-guide.html) | complete technical study material, foundations to corner cases, with the gap-fix implementations |

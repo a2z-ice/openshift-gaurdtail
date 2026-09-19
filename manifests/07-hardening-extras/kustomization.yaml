@@ -1,6 +1,7 @@
 # Hardening extras that were previously only described in the docs.
 # Included in base: OAuth token lifetimes, admission-policy health alerts, nightly etcd snapshot.
-# Examples (apply deliberately, see headers): ldap-group-sync, control-plane SSH lockdown, etcd encryption.
+# Examples (apply deliberately, see headers): ldap-group-sync, control-plane SSH lockdown.
+# etcd encryption lives in 01-audit/apiserver-audit.yaml (same APIServer object).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

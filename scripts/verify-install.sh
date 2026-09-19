@@ -9,14 +9,14 @@ check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "
 
 echo "== Guardrail objects"
 check "GuardrailConfig default exists"           oc get guardrailconfig default
-for p in guardrails-critical-delete guardrails-gitops-only-mutation guardrails-rbac-escalation-audit; do
+for p in guardrails-critical-delete guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-rbac-escalation-audit; do
   check "ValidatingAdmissionPolicy $p"            oc get validatingadmissionpolicy "$p"
   W="$(oc get validatingadmissionpolicy "$p" -o jsonpath='{.status.typeChecking.expressionWarnings[*].warning}' 2>/dev/null | wc -w)"
   [[ "$W" -gt 0 ]] && warn "$p has $W type-checking warning words (expected for multi-kind policies; confirm no 'compilation' errors: oc get vap $p -o yaml | grep -i error)"
-  C="$(oc get validatingadmissionpolicy "$p" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
-  [[ "$C" == "True" ]] || warn "$p Ready condition is '$C'"
+  E="$(oc get validatingadmissionpolicy "$p" -o json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=[x for x in d.get("status",{}).get("conditions",[]) if x.get("status")=="False"]; print(len(c))' 2>/dev/null || echo 0)"
+  [[ "$E" == "0" ]] || bad "$p has $E False status condition(s): oc get vap $p -o jsonpath='{.status.conditions}'"
 done
-for b in guardrails-critical-delete-labelled guardrails-critical-delete-named guardrails-gitops-only-mutation guardrails-rbac-escalation-audit; do
+for b in guardrails-critical-delete-labelled guardrails-critical-delete-named guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-gitops-only-mutation-hardened guardrails-rbac-escalation-audit; do
   check "Binding $b" oc get validatingadmissionpolicybinding "$b"
   echo "       actions: $(oc get validatingadmissionpolicybinding "$b" -o jsonpath='{.spec.validationActions}' 2>/dev/null)"
 done
@@ -28,7 +28,7 @@ if oc get secret kubeadmin -n kube-system >/dev/null 2>&1; then bad "kubeadmin s
 N="$(oc get clusterrolebinding -o json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for b in d["items"] if b["roleRef"]["name"]=="cluster-admin" for s in b.get("subjects",[]) if s["kind"]=="User"))' 2>/dev/null || echo "?")"
 [[ "$N" == "0" ]] && ok "no User subjects bound directly to cluster-admin" || warn "$N User subject(s) bound directly to cluster-admin"
 for g in gitops-deletion-approvers gitops-deletion-requesters platform-admins; do check "Group $g" oc get group "$g"; done
-A="$(oc get group gitops-deletion-approvers -o jsonpath='{.users}' 2>/dev/null | tr ',' '\n' | wc -l)"
+A="$(oc get group gitops-deletion-approvers -o jsonpath='{.users[*]}' 2>/dev/null | wc -w | tr -d ' ')"
 [[ "$A" -ge 4 ]] && ok "approver group has $A members" || warn "approver group has only $A member(s); need >= 4 for the two-person rule to be workable"
 
 echo "== Audit"
@@ -40,17 +40,21 @@ R="$(oc get clusterlogforwarder audit-forwarder -n openshift-logging -o jsonpath
 check "LokiStack logging-loki"                    oc get lokistack logging-loki -n openshift-logging
 check "AlertingRule guardrails-audit-alerts"     oc get alertingrule guardrails-audit-alerts -n openshift-logging
 check "PrometheusRule guardrails-gitops-health"  oc get prometheusrule guardrails-gitops-health -n openshift-gitops
+check "PrometheusRule guardrails-vap-health"     oc get prometheusrule guardrails-vap-health -n openshift-kube-apiserver
+check "PrometheusRule guardrails-notification-health" oc get prometheusrule guardrails-notification-health -n openshift-monitoring
 
 echo "== Alertmanager"
 if oc -n openshift-monitoring get secret alertmanager-main -o jsonpath='{.data.alertmanager\.yaml}' | base64 -d | grep -q msteamsv2_configs; then ok "Teams receiver configured"; else bad "msteamsv2_configs missing in alertmanager-main"; fi
 if oc -n openshift-monitoring get secret alertmanager-main -o jsonpath='{.data.alertmanager\.yaml}' | base64 -d | grep -q 'guardrail="true"'; then ok "guardrail route configured"; else bad "guardrail route missing"; fi
-check "Alertmanager pods running"                 oc get pods -n openshift-monitoring -l app.kubernetes.io/name=alertmanager --field-selector=status.phase=Running
+AMP="$(oc get pods -n openshift-monitoring -l app.kubernetes.io/name=alertmanager --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')"; [[ "$AMP" -ge 1 ]] && ok "Alertmanager pods running ($AMP)" || bad "no running Alertmanager pod"
 
 echo "== Argo CD"
 check "ArgoCD CR openshift-gitops"                oc get argocd openshift-gitops -n openshift-gitops
 D="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.disableAdmin}' 2>/dev/null)"; [[ "$D" == "true" ]] && ok "local admin disabled" || warn "spec.disableAdmin=$D"
 check "Application guardrails"                    oc get application guardrails -n openshift-gitops
 F="$(oc get application guardrails -n openshift-gitops -o jsonpath='{.metadata.finalizers}' 2>/dev/null)"; [[ -z "$F" ]] && ok "guardrails app has no cascade finalizer" || bad "guardrails app has finalizers: $F"
+SY="$(oc get application guardrails -n openshift-gitops -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null)"; [[ "$SY" == "Synced/Healthy" ]] && ok "guardrails app Synced/Healthy" || bad "guardrails app is $SY (AppProject destinations/whitelist?)"
+G="$(oc get guardrailconfig default -o jsonpath='{.spec.gitopsControllers[*]}' 2>/dev/null)"; [[ "$G" == *application-controller* && "$G" != *argocd-server* ]] && ok "gitopsControllers = Argo CD controllers only" || bad "gitopsControllers misconfigured: $G"
 echo "  critical-labelled objects:"; oc get argocd,application,appproject -A -l guardrails.example.com/critical=true --no-headers 2>/dev/null | sed 's/^/    /'
 
 echo "== Backup"

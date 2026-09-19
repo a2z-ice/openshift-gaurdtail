@@ -8,7 +8,7 @@ Argo CD is both the most valuable object on the cluster and the tool that can de
 |---|---|---|
 | Delete Argo CD itself | `oc delete argocd`, `oc delete ns openshift-gitops`, uninstall the operator, delete the `argoproj.io` CRDs | Admission guardrail (name-protected), alerts, backups |
 | Delete *through* Argo CD | delete an `Application` that has `resources-finalizer.argocd.argoproj.io` → Argo CD deletes every managed resource; delete an `ApplicationSet` → its Applications (and their resources) go | No cascade finalizers, `preserveResourcesOnDeletion`, Argo CD RBAC `delete: deny`, Applications labelled critical |
-| Delete *via Git* | remove a manifest → auto-sync with `prune: true` deletes it | `prune: false` for critical apps; the controller SA is not exempt so a prune of a critical object is denied and alerted; 2-reviewer PRs |
+| Delete *via Git* | remove a manifest → auto-sync with `prune: true` deletes it | **the approved path**: the repository ruleset (2 reviewers, code owners, CI invariants) is the control; the controller is a `gitopsController`; `GitOpsCriticalDeletionApplied` alerts for PR correlation |
 
 ## ArgoCD CR hardening (`manifests/04-argocd/argocd-cr-hardening-patch.yaml`)
 
@@ -19,8 +19,8 @@ Argo CD is both the most valuable object on the cluster and the tool that can de
 | `spec.sso.dex.openShiftOAuth` | `true` | Argo CD identity = cluster identity = audit identity |
 | `spec.rbac.defaultPolicy` | `role:readonly` | everyone can look, nobody can act by default |
 | `spec.rbac.policy` | `role:operator` with `applications, delete, deny`, `projects, delete, deny`, `exec, create, deny` | day-2 operators cannot delete apps or exec into pods via Argo CD |
-| `spec.resourceExclusions` | `guardrails.example.com/*` | no unrelated Application can adopt (and later prune) guardrail objects |
-| `spec.extraConfig.controller.diff.server.side` | `"true"` | server-side diff, so human-added approval annotations are not seen as drift |
+| `spec.controller.env ARGOCD_CONTROLLER_DIFF_SERVER_SIDE` | `"true"` | server-side diff, so human-added approval annotations are not seen as drift (an `extraConfig` key would be a no-op) |
+| `spec.rbac.policy` (cont.) | `applications, override, deny`; `create/update, guardrails/*, deny`; `applicationsets, create/update, deny` | operators cannot `sync --local` arbitrary manifests as the controller, nor point an Application in the guardrails project at another branch |
 | `spec.extraConfig.resource.customizations.ignoreDifferences.all` | the three `delete-*` annotations | belt and braces for the above |
 | `spec.server.route.tls.termination` | `reencrypt` | TLS end to end |
 
@@ -31,23 +31,23 @@ Apply it as a server-side apply with its own field manager (Argo CD does that wh
 Rules for every production `Application`:
 
 1. **No `resources-finalizer.argocd.argoproj.io`** unless you explicitly want "delete app ⇒ delete workloads". For existing apps: `oc -n openshift-gitops patch application <app> --type json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`.
-2. `syncPolicy.automated.prune: false` and `syncOptions: [Prune=false]` for anything critical; use a manual, reviewed sync with prune for intentional removals.
+2. `syncPolicy.automated.prune: true` is correct for Git-managed applications whose repository enforces the 2-reviewer ruleset (Git is the source of truth); keep `prune: false` only where the repository does not.
 3. `syncPolicy.automated.selfHeal: true` so out-of-band edits are reverted (this is what makes the guardrail objects self-protecting).
 4. Label `guardrails.example.com/critical: "true"` on the Application itself so deleting the *Application* needs approvals.
 5. For `ApplicationSet`s: `spec.syncPolicy.preserveResourcesOnDeletion: true` (affects newly generated Applications only) and `applicationsSync: sync` so a template change cannot re-enable prune per app. Template in `applicationset-defaults-snippet.yaml`.
 
-The `guardrails` Application (`application-guardrails.yaml`) follows all five, points at the overlay of the current phase, and has `ignoreDifferences` for the three approval annotations plus `Group.users` (owned by IdP sync).
+The `guardrails` Application (`application-guardrails.yaml`) follows all five, points at the overlay of the current phase, prunes, and has `ignoreDifferences` for the three approval annotations plus `Group.users` (owned by IdP sync).
 
 ## AppProject fencing (`appproject-guardrails.yaml`)
 
-`sourceRepos` pinned to this repository, `destinations` limited to the platform namespaces, `clusterResourceWhitelist` limited to the kinds this repository actually manages. A compromised app repo therefore cannot deploy a `ValidatingAdmissionPolicyBinding` that neutralises the guardrail.
+`sourceRepos` pinned to this repository, `destinations` listing **every** namespace the base renders into (openshift-gitops, openshift-gitops-operator, guardrails-system, openshift-logging, openshift-operators-redhat, openshift-monitoring, openshift-adp, openshift-etcd-backup, openshift-kube-apiserver; a missing one makes the sync fail), `clusterResourceWhitelist` limited to the kinds this repository actually manages. A compromised app repo therefore cannot deploy a `ValidatingAdmissionPolicyBinding` that neutralises the guardrail.
 
 ## What happens when Git deletes a critical manifest
 
-1. PR removes `manifests/03-guardrails/vap-critical-delete-bindings.yaml` and gets merged (two reviewers were fooled or colluded).
-2. Argo CD marks the live binding as *orphaned/OutOfSync*; with `prune: false` it does **not** delete it. Nothing changes on the cluster.
-3. If someone runs a manual sync with prune, the controller SA issues DELETE → V1 denies (the SA is not exempt, no approvals) → sync fails with the GUARDRAIL message → `CriticalResourceDeleteDenied` alert to Teams/email.
-4. The binding stays; the PR is reverted.
+1. A PR removes a manifest. CI invariants reject known weakenings (a binding losing `Deny`, humans in exempt lists); otherwise two reviewers including a code owner from security must approve.
+2. After merge, Argo CD prunes the object as `openshift-gitops-argocd-application-controller`, a `gitopsController`: the deletion is allowed.
+3. `GitOpsCriticalDeletionApplied` (warning) reaches Teams with the object and identity; the on-call links it to the PR (`git log -S <name>`). A Git-driven deletion **without** a matching PR means the controller identity is compromised: treat as `CriticalResourceDeleted` and check `PrivilegedTokenMinted`.
+4. Deleting the same object through the Argo CD **UI** is not the Git path: `argocd-server` is denied unless the workflow ran (and Argo CD RBAC already denies delete to operators).
 
 ## Operator and CRDs
 

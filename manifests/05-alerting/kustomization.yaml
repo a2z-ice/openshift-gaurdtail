@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - loki-alertingrules-audit.yaml
   - prometheusrule-gitops-health.yaml
+  - prometheusrule-notification-health.yaml
 # alertmanager-main.yaml contains secrets (SMTP password, Teams webhook). Render it from the vault / ESO
 # and apply out of band, or include it here ONLY if your repo is encrypted (SOPS/Sealed Secrets).
 # alertmanagerconfig-uwm-alternative.yaml is an alternative path, not applied by default.

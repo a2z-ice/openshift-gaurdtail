@@ -4,8 +4,12 @@
 #                 objectSelector is evaluated against object OR oldObject, so removing the label
 #                 in the same UPDATE does not escape the policy.
 #   B "named"   : low-traffic kinds protected by name/namespace rules regardless of label
-#                 (namespaces, CRDs, the policies themselves, groups, apiservers, OLM, argocds, guardrailconfigs).
-# parameterNotFoundAction: Deny + failurePolicy: Fail => fail CLOSED if GuardrailConfig/default is missing.
+#                 (namespaces, CRDs, the policies themselves, groups, apiservers, OLM, argocds, guardrailconfigs,
+#                 and namespaced roles/rolebindings named guardrails-*).
+# parameterNotFoundAction: A = Deny (fail closed for labelled objects); B = Allow, because B matches EVERY
+#   update/delete of namespaces, CRDs, cluster RBAC, groups and OLM objects cluster-wide and a missing
+#   GuardrailConfig must not stop OLM, the namespace lifecycle or the control plane. The absence of
+#   GuardrailConfig/default is itself alerted (GuardrailPolicyModified on its deletion; verify-install).
 # Phase: this file is the PHASE 3 (enforce) version; overlays patch validationActions for phases 1-2.
 # ---------------------------------------------------------------------------
 apiVersion: admissionregistration.k8s.io/v1
@@ -37,7 +41,7 @@ spec:
   policyName: guardrails-critical-delete
   paramRef:
     name: default
-    parameterNotFoundAction: Deny
+    parameterNotFoundAction: Allow
   validationActions: ["Deny", "Audit"]
   matchResources:
     resourceRules:
@@ -64,7 +68,7 @@ spec:
       - apiGroups: ["rbac.authorization.k8s.io"]
         apiVersions: ["*"]
         operations: ["UPDATE", "DELETE"]
-        resources: ["clusterroles", "clusterrolebindings"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
       - apiGroups: ["config.openshift.io"]
         apiVersions: ["*"]
         operations: ["UPDATE", "DELETE"]

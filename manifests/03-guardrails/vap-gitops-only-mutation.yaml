@@ -6,8 +6,14 @@
 #           the guardrail annotation workflow. Humans hand-editing Argo CD config,
 #           the audit profile, the log forwarder or the alerting rules out of band
 #           are stopped (phase 4) or flagged (phases 1-3).
-# Phase   : 1-3 validationActions [Audit]  -> detection only, alert ArgoCDDirectMutation
-#           4   validationActions [Deny, Audit]
+# Bindings:
+#   guardrails-gitops-only-mutation          : all matched kinds; phases 1-3 [Audit] (alert ArgoCDDirectMutation), phase 4 [Deny, Audit]
+#   guardrails-gitops-only-mutation-hardened : the SELF-PROTECTION set (GuardrailConfig, the policies and bindings,
+#                                              guardrails-* cluster RBAC, the privileged Groups, APIServer/OAuth,
+#                                              labelled CronJobs) - [Deny, Audit] in EVERY phase. Without it a single
+#                                              approver could patch validationActions, exemptUsers or Group.users
+#                                              in phases 1-3. Only Argo CD, the group-sync SA (for Groups) and
+#                                              break-glass may change these; humans may still add approval annotations.
 # Rollback: oc delete validatingadmissionpolicybinding guardrails-gitops-only-mutation
 # ---------------------------------------------------------------------------
 apiVersion: admissionregistration.k8s.io/v1
@@ -63,11 +69,27 @@ spec:
       - apiGroups: ["rbac.authorization.k8s.io"]
         apiVersions: ["*"]
         operations: ["UPDATE"]
-        resources: ["clusterroles", "clusterrolebindings"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["groups"]
+      - apiGroups: ["batch"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["cronjobs"]
+      - apiGroups: ["monitoring.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["alertmanagerconfigs"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["networkpolicies"]
       - apiGroups: [""]
         apiVersions: ["*"]
         operations: ["UPDATE"]
-        resources: ["secrets", "configmaps"]
+        resources: ["secrets", "configmaps", "serviceaccounts"]
   variables:
     - name: oldLabels
       expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
@@ -85,11 +107,13 @@ spec:
         || (request.resource.group == 'guardrails.example.com')
         || (request.resource.group == 'config.openshift.io')
         || (request.resource.group == 'rbac.authorization.k8s.io' && oldObject.metadata.name.startsWith('guardrails-'))
+        || (request.resource.group == 'user.openshift.io'
+          && oldObject.metadata.name in ['platform-admins', 'gitops-deletion-approvers', 'gitops-deletion-requesters', 'gitops-operators', 'auditors', 'breakglass-custodians'])
         || (request.resource.group == 'argoproj.io' && request.resource.resource == 'argocds' && has(request.namespace) && request.namespace == 'openshift-gitops')
     - name: isCritical
       expression: "variables.labelCritical || variables.nameCritical"
     - name: isTrustedWriter
-      expression: "request.userInfo.username in params.spec.exemptUsers || request.userInfo.username in params.spec.gitopsServiceAccounts || request.userInfo.username in params.spec.reaperUsers"
+      expression: "request.userInfo.username in params.spec.exemptUsers || request.userInfo.username in params.spec.gitopsControllers || request.userInfo.username in params.spec.gitopsServiceAccounts"
     - name: nonGuardrailAnnotationsUnchanged
       expression: >-
         variables.newAnn.all(k, k.startsWith('guardrails.example.com/delete-') || (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k]))
@@ -102,6 +126,14 @@ spec:
         && has(object.rules) == has(oldObject.rules) && (!has(object.rules) || object.rules == oldObject.rules)
         && has(object.subjects) == has(oldObject.subjects) && (!has(object.subjects) || object.subjects == oldObject.subjects)
         && has(object.roleRef) == has(oldObject.roleRef) && (!has(object.roleRef) || object.roleRef == oldObject.roleRef)
+        && has(object.users) == has(oldObject.users) && (!has(object.users) || object.users == oldObject.users)
+        && has(object.webhooks) == has(oldObject.webhooks) && (!has(object.webhooks) || object.webhooks == oldObject.webhooks)
+        && has(object.aggregationRule) == has(oldObject.aggregationRule) && (!has(object.aggregationRule) || object.aggregationRule == oldObject.aggregationRule)
+        && has(object.binaryData) == has(oldObject.binaryData) && (!has(object.binaryData) || object.binaryData == oldObject.binaryData)
+        && has(object.immutable) == has(oldObject.immutable) && (!has(object.immutable) || object.immutable == oldObject.immutable)
+        && has(object.operation) == has(oldObject.operation) && (!has(object.operation) || object.operation == oldObject.operation)
+        && has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
+        && has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
   validations:
     - expression: >-
         !variables.isCritical || variables.isTrustedWriter
@@ -132,3 +164,44 @@ spec:
     parameterNotFoundAction: Deny
   # Phases 1-3: Audit only (detection). Phase 4 overlay switches to [Deny, Audit].
   validationActions: ["Audit"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-gitops-only-mutation-hardened
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-gitops-only-mutation
+  paramRef:
+    name: default
+    parameterNotFoundAction: Deny
+  # Self-protection set: Deny in EVERY phase (no overlay patches this binding).
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    resourceRules:
+      - apiGroups: ["guardrails.example.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["guardrailconfigs"]
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["groups"]
+      - apiGroups: ["config.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["apiservers", "oauths"]
+      - apiGroups: ["batch"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["cronjobs"]

@@ -5,6 +5,9 @@
 # applies to every authenticated identity including cluster-admin/system:masters.
 #
 # What it does
+#   Scope: OUT-OF-BAND changes only. The GitOps path (Argo CD application/ApplicationSet controllers,
+#   params.spec.gitopsControllers) is pre-approved by the repository ruleset and exempt; its deletions are
+#   alerted (GitOpsCriticalDeletionApplied) for correlation with the merged PR.
 #   DELETE of a critical resource  -> denied unless the object carries a deletion
 #                                     request AND >= minApprovers DISTINCT approvals
 #                                     from members of the approver group, none of
@@ -143,10 +146,17 @@ spec:
     - name: isCritical
       expression: "variables.labelCritical || variables.nameCritical"
     # ---- who is asking
+    - name: isGitOps
+      expression: "request.userInfo.username in params.spec.gitopsControllers"
     - name: isExempt
-      expression: "request.userInfo.username in params.spec.exemptUsers"
+      expression: "request.userInfo.username in params.spec.exemptUsers || variables.isGitOps"
     - name: isReaper
       expression: "request.userInfo.username in params.spec.reaperUsers"
+    - name: isOlmCsvReplacement
+      expression: >-
+        request.operation == 'DELETE' && request.resource.group == 'operators.coreos.com'
+        && request.resource.resource == 'clusterserviceversions'
+        && request.userInfo.username in params.spec.olmServiceAccounts"
     - name: isApprover
       expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups)"
     - name: isRequester
@@ -205,13 +215,20 @@ spec:
           && has(object.subjects) == has(oldObject.subjects) && (!has(object.subjects) || object.subjects == oldObject.subjects)
           && has(object.roleRef) == has(oldObject.roleRef) && (!has(object.roleRef) || object.roleRef == oldObject.roleRef)
           && has(object.users) == has(oldObject.users) && (!has(object.users) || object.users == oldObject.users)
-          && has(object.webhooks) == has(oldObject.webhooks) && (!has(object.webhooks) || object.webhooks == oldObject.webhooks) )
+          && has(object.webhooks) == has(oldObject.webhooks) && (!has(object.webhooks) || object.webhooks == oldObject.webhooks)
+          && has(object.aggregationRule) == has(oldObject.aggregationRule) && (!has(object.aggregationRule) || object.aggregationRule == oldObject.aggregationRule)
+          && has(object.binaryData) == has(oldObject.binaryData) && (!has(object.binaryData) || object.binaryData == oldObject.binaryData)
+          && has(object.immutable) == has(oldObject.immutable) && (!has(object.immutable) || object.immutable == oldObject.immutable)
+          && has(object.operation) == has(oldObject.operation) && (!has(object.operation) || object.operation == oldObject.operation)
+          && has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
+          && has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) )
     - name: onlyGuardrailAnnotationsChanged
       expression: "variables.payloadUnchanged && variables.nonGuardrailAnnotationsUnchanged"
   validations:
-    # V1 - DELETE needs the two-person rule satisfied
+    # V1 - DELETE needs the two-person rule satisfied (exception: OLM replacing a superseded CSV on operator upgrade)
     - expression: >-
         !variables.isCritical || variables.isExempt || request.operation != 'DELETE' || variables.deletionApproved
+        || variables.isOlmCsvReplacement
       reason: Forbidden
       messageExpression: >-
         'GUARDRAIL DENIED: deleting critical ' + request.resource.resource + ' '
@@ -273,5 +290,6 @@ spec:
            + ' requestedBy=' + variables.oldRequestedBy
            + ' approvers=' + variables.oldApprovers.join('|')
            + ' approved=' + string(variables.deletionApproved)
-           + ' exempt=' + string(variables.isExempt))
+           + ' exempt=' + string(variables.isExempt)
+           + ' gitops=' + string(variables.isGitOps))
         : null

@@ -23,7 +23,7 @@ oc get validatingadmissionpolicy guardrails-critical-delete -o jsonpath='{.statu
 
 ## Functional matrix (`scripts/test-guardrails.sh`)
 
-Creates namespace `guardrails-test` with a critical-labelled ConfigMap and runs 32 cases. Real critical objects are touched only with `--dry-run=server`, which still goes through admission. Two identity modes: impersonation (fast, raises `ImpersonationUsed` on purpose) or four real kubeconfigs (sign-off run).
+Creates namespace `guardrails-test` (with the namespaced RoleBindings the workflow roles need there), labels scratch ConfigMaps critical **as an approver** (label control), and runs about 60 cases across eleven sections: label control, RBAC least privilege, single-identity deletes, the hardened self-protection binding, forged approvals, the happy path with every negative branch, cancel, the reaper (expired and future-dated entries, remove-only), the GitOps path (controller identity allowed, `argocd-server` denied), the rbac-escalation warning, and cleanup through the workflow (the namespace must not be left Terminating). Expectations are derived from the live `validationActions`, so the script passes in every phase. Real critical objects are touched only with `--dry-run=server`. Two identity modes: impersonation (fast, raises `ImpersonationUsed`/`PrivilegedIdentityImpersonated` on purpose) or real kubeconfigs (sign-off run; SA-identity cases are skipped or run through a Job). Evidence: `evidence/<ts>.log`.
 
 | # | Case | Expected (phase 3) |
 |---|---|---|
@@ -67,7 +67,7 @@ IMPERSONATE=false KUBECONFIG_REQUESTER=~/.kube/req KUBECONFIG_APPROVER1=~/.kube/
 
 Output: PASS/FAIL per case and `evidence-<ts>.log` with the full API responses; attach it to the change ticket.
 
-In phase 1 (Audit only) the "deny" cases *succeed* by design; the proof is the audit annotation:
+The full control-to-test traceability matrix is in `docs/16-production-readiness-review.md`. In phase 1 (Audit only) the "deny" cases *succeed* by design and the script expects that; the proof is the audit annotation:
 
 ```logql
 {log_type="audit"} | json | objectRef_namespace="guardrails-test" | annotations_validation_policy_admission_k8s_io_validation_failure=~".+"
@@ -84,7 +84,7 @@ Record timestamps: audit `requestReceivedTimestamp` → alert `startsAt` → Tea
 
 ## Git-side
 
-- Open a PR that deletes `manifests/03-guardrails/vap-critical-delete-bindings.yaml`: CI invariant fails; even if merged, Argo CD does not prune (`prune: false`); a manual prune sync is denied and alerted (docs/05).
+- Open a PR that deletes `manifests/03-guardrails/vap-critical-delete-bindings.yaml`: the CI invariant fails (a base binding must include Deny). A PR that removes a non-guardrail critical object passes CI, needs two approvals incl. a security code owner, and after merge Argo CD prunes it (GitOps path) with `GitOpsCriticalDeletionApplied` for correlation (T7.1).
 - Open a PR adding a human to `exemptUsers`: CI invariant fails; CODEOWNERS requires security review.
 
 ## Recovery

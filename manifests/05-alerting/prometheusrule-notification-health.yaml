@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Notification delivery health. A guardrail alert that Alertmanager cannot deliver is a silent failure.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: guardrails-notification-health
+  namespace: openshift-monitoring
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  groups:
+    - name: guardrails.notifications
+      rules:
+        - alert: GuardrailNotificationFailing
+          expr: |
+            sum by (integration) (rate(alertmanager_notifications_failed_total{namespace="openshift-monitoring", integration=~"msteamsv2|email"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Alertmanager cannot deliver {{ $labels.integration }} notifications"
+            description: "Teams webhook rotated/blocked or SMTP relay failing. Guardrail alerts still reach the default receiver; fix the integration. Check: oc -n openshift-monitoring logs alertmanager-main-0 -c alertmanager | grep -i notify"
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#detection-pipeline
+        - alert: GuardrailAlertmanagerConfigInvalid
+          expr: alertmanager_config_last_reload_successful{namespace="openshift-monitoring"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Alertmanager failed to load its configuration"
+            description: "The last alertmanager-main reload failed; the previous config is still active but changes are not applied. amtool check-config on the rendered file."

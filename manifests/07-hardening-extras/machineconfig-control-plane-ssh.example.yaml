@@ -3,8 +3,9 @@
 # nodes. Node-level access is the one path around the admission guardrail (residual risk R2).
 # With this in place the only way onto a master is `oc debug node/...`, which is an API request,
 # audited, and alerted by ControlPlaneNodeAccess.
-# Effects: sshd stays installed for Red Hat support procedures but is disabled; the core user's
-# authorized_keys is emptied. Re-enable by deleting this MachineConfig (rolls the masters).
+# Effects: sshd is masked. NOTE: the MCO MERGES sshAuthorizedKeys across MachineConfigs, so an empty list here
+# does NOT remove the installer's key from 99-master-ssh; masking sshd is the effective control. To remove the
+# key as well, edit/delete the 99-master-ssh MachineConfig in the same PR. Re-enable by deleting this MachineConfig (rolls the masters).
 # Do NOT apply to workers without a separate decision; do not apply on SNO without console access.
 # ---------------------------------------------------------------------------
 apiVersion: machineconfiguration.openshift.io/v1
