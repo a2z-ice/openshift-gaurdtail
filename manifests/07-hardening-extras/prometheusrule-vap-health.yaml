@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Health of the admission policies themselves (kube-apiserver metrics).
+#   apiserver_validating_admission_policy_check_total{policy, policy_binding, error_type, enforcement_action}
+#     error_type: "none" | "invalid_error" | "internal_error" | "out_of_budget"
+#   A non-"none" error_type with failurePolicy=Fail means requests are being DENIED for the wrong reason
+#   (CEL runtime error / cost budget exceeded) - the guardrail is failing closed. Investigate the expression.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: guardrails-vap-health
+  namespace: openshift-kube-apiserver
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  groups:
+    - name: guardrails.admission-policy
+      rules:
+        - alert: GuardrailPolicyEvaluationErrors
+          expr: |
+            sum by (policy, policy_binding, error_type) (
+              rate(apiserver_validating_admission_policy_check_total{policy=~"guardrails-.*", error_type!="none"}[5m])
+            ) > 0
+          for: 2m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Guardrail policy {{ $labels.policy }} is producing {{ $labels.error_type }} errors"
+            description: "CEL runtime errors or cost-budget exhaustion on {{ $labels.policy_binding }}. With failurePolicy=Fail affected requests are denied. Check: oc get vap {{ $labels.policy }} -o yaml (status), and kube-apiserver logs for 'admission policy'."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#guardrail-tampering
+        - alert: GuardrailPolicyNotEvaluating
+          expr: |
+            sum(rate(apiserver_validating_admission_policy_check_total{policy="guardrails-critical-delete"}[30m])) == 0
+            or absent(apiserver_validating_admission_policy_check_total{policy="guardrails-critical-delete"})
+          for: 60m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "guardrails-critical-delete has evaluated zero requests in 30 minutes"
+            description: "Either the cluster is idle on critical kinds (possible) or the policy/binding is missing. Confirm with: oc get vap,vapb -l app.kubernetes.io/part-of=guardrails"
+        - alert: GuardrailPolicySlow
+          expr: |
+            histogram_quantile(0.99, sum by (le, policy) (rate(apiserver_validating_admission_policy_check_duration_seconds_bucket{policy=~"guardrails-.*"}[5m]))) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "p99 evaluation time of {{ $labels.policy }} above 50 ms"
+            description: "Large objects (specs compared for equality) or very long approval annotations. Review payloadUnchanged scope."

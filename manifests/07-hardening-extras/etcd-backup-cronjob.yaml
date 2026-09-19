@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# Nightly etcd snapshot on one control-plane node using Red Hat's supported script
+# (/usr/local/bin/cluster-backup.sh). Keeps the last 7 snapshots on the node under
+# /var/backup/etcd. Ship them off-node with your backup tooling (rsync/S3 sync sidecar
+# or a node-level agent); etcd snapshots contain every Secret and MUST be encrypted at rest.
+# Prereqs: the pod runs privileged with host access; the namespace is openshift-* so PSA
+# does not apply; the SA is bound to the privileged SCC.
+# Restore procedure: Red Hat docs "Restoring to a previous cluster state" (disaster only).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-etcd-backup
+  labels:
+    guardrails.example.com/critical: "true"
+    openshift.io/cluster-monitoring: "true"
+  annotations:
+    openshift.io/node-selector: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-backup
+  namespace: openshift-etcd-backup
+  labels:
+    guardrails.example.com/critical: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-etcd-backup-privileged
+  labels:
+    guardrails.example.com/critical: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+  - kind: ServiceAccount
+    name: etcd-backup
+    namespace: openshift-etcd-backup
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: openshift-etcd-backup
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: etcd-backup
+          restartPolicy: Never
+          hostNetwork: true
+          hostPID: true
+          nodeSelector:
+            node-role.kubernetes.io/master: ""
+          tolerations:
+            - key: node-role.kubernetes.io/master
+              operator: Exists
+              effect: NoSchedule
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: backup
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+              securityContext:
+                privileged: true
+                runAsUser: 0
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  DEST=/host/var/backup/etcd/$(date -u +%Y%m%dT%H%M%SZ)
+                  chroot /host /bin/bash -c "mkdir -p ${DEST#/host} && /usr/local/bin/cluster-backup.sh ${DEST#/host}"
+                  echo "snapshot written to ${DEST#/host}"
+                  # retention: keep newest 7
+                  chroot /host /bin/bash -c 'ls -1dt /var/backup/etcd/*/ | tail -n +8 | xargs -r rm -rf'
+                  chroot /host /bin/bash -c 'ls -lh /var/backup/etcd/'
+              volumeMounts:
+                - name: host
+                  mountPath: /host
+          volumes:
+            - name: host
+              hostPath:
+                path: /
+                type: Directory

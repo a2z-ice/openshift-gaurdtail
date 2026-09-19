@@ -21,10 +21,11 @@ guardrail:
   executor_may_be_approver: false
   approval_ttl: 4h
   exempt_users: [system:apiserver, system:serviceaccount:guardrails-system:breakglass]
-  gitops_service_accounts: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller]
-  reaper: { cronjob: guardrails-system/approval-reaper, may: remove-only }
+  gitops_service_accounts: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller, system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server, system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller, system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager]
+  reaper: { cronjob: guardrails-system/approval-reaper, may: remove-only, also_removes: future-dated or invalid timestamps }
   policies:
     - { name: guardrails-critical-delete, bindings: [guardrails-critical-delete-labelled, guardrails-critical-delete-named], rules: [V1 delete, V2 label, V3 approvals, V4 request] }
+    - { name: guardrails-critical-label-control, bindings: [guardrails-critical-label-control], rule: only trusted identities may add the critical label }
     - { name: guardrails-gitops-only-mutation, bindings: [guardrails-gitops-only-mutation] }
     - { name: guardrails-rbac-escalation-audit, bindings: [guardrails-rbac-escalation-audit], never_denies: true }
   name_protected:

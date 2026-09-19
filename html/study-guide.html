@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenShift Guardrails Study Guide</title>
+<meta name="description" content="Complete study material for the OpenShift 4.21 audit-trail and critical-resource deletion guardrail solution: foundations, every layer step by step, corner cases and gap implementations.">
+<style>
+:root{--bg:#ffffff;--fg:#1b1f24;--muted:#57606a;--line:#d8dee4;--code:#f6f8fa;--accent:#0b5cad;--warn-bg:#fff4e0;--warn:#b36b00;--bad-bg:#fde7e7;--bad:#b00020;--ok-bg:#e6f4ea;--ok:#1e7d3a;--info-bg:#e8f1fb;--nav:#f3f5f7}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0d1117;--fg:#e6edf3;--muted:#9aa4af;--line:#30363d;--code:#161b22;--accent:#58a6ff;--warn-bg:#2a2210;--warn:#e3b341;--bad-bg:#2c1214;--bad:#ff7b72;--ok-bg:#12261a;--ok:#56d364;--info-bg:#101c2b;--nav:#10151c}}
+:root[data-theme="dark"]{--bg:#0d1117;--fg:#e6edf3;--muted:#9aa4af;--line:#30363d;--code:#161b22;--accent:#58a6ff;--warn-bg:#2a2210;--warn:#e3b341;--bad-bg:#2c1214;--bad:#ff7b72;--ok-bg:#12261a;--ok:#56d364;--info-bg:#101c2b;--nav:#10151c}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.layout{display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav{background:var(--nav);border-right:1px solid var(--line);padding:20px 16px;position:sticky;top:0;height:100vh;overflow-y:auto;font-size:14px}
+nav h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 6px}
+nav ol{list-style:none;padding:0;margin:0}nav li{margin:2px 0}nav li a{display:block;padding:3px 6px;border-radius:4px;color:var(--fg)}nav li a:hover{background:var(--line);text-decoration:none}
+nav li.sub a{padding-left:18px;color:var(--muted);font-size:13px}
+main{padding:32px 48px 96px;max-width:1100px}
+h1{font-size:2rem;line-height:1.2;margin:0 0 8px}
+h2{font-size:1.5rem;margin:56px 0 12px;padding-top:8px;border-top:2px solid var(--line)}
+h3{font-size:1.15rem;margin:32px 0 8px}
+h4{font-size:1rem;margin:20px 0 6px}
+p{margin:10px 0}
+.lead{font-size:1.1rem;color:var(--muted)}
+code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+pre{background:var(--code);border:1px solid var(--line);border-radius:6px;padding:14px 16px;overflow-x:auto;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14.5px}
+th,td{border:1px solid var(--line);padding:7px 10px;vertical-align:top;text-align:left}
+th{background:var(--code)}
+.box{border-left:4px solid var(--accent);background:var(--info-bg);padding:10px 14px;margin:14px 0;border-radius:0 6px 6px 0}
+.box.warn{border-color:var(--warn);background:var(--warn-bg)}
+.box.bad{border-color:var(--bad);background:var(--bad-bg)}
+.box.ok{border-color:var(--ok);background:var(--ok-bg)}
+.box .t{font-weight:700;display:block;margin-bottom:4px}
+.corner{border:1px solid var(--line);border-radius:6px;padding:12px 16px;margin:14px 0}
+.corner .t{font-weight:700;color:var(--warn)}
+.gap{border:2px solid var(--ok);border-radius:6px;padding:12px 16px;margin:18px 0}
+.gap .t{font-weight:700;color:var(--ok);display:block;margin-bottom:6px}
+.step{counter-increment:step;position:relative;padding-left:44px;margin:14px 0}
+.step::before{content:counter(step);position:absolute;left:0;top:2px;width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:14px}
+.steps{counter-reset:step}
+.diagram{white-space:pre;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);border:1px solid var(--line);border-radius:6px;padding:14px 16px;overflow-x:auto}
+.kbd{display:inline-block;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 6px;font-size:.85em;background:var(--code)}
+details{border:1px solid var(--line);border-radius:6px;padding:8px 14px;margin:10px 0}
+summary{cursor:pointer;font-weight:600}
+.tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;border:1px solid var(--line);background:var(--code);margin-left:6px;vertical-align:middle}
+.q{font-weight:600;margin-top:12px}
+small,.muted{color:var(--muted)}
+.toggle{position:fixed;right:14px;top:10px;border:1px solid var(--line);background:var(--code);color:var(--fg);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px}
+@media (max-width:900px){.layout{grid-template-columns:1fr}nav{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}main{padding:16px 16px 64px}}
+@media print{nav,.toggle{display:none}.layout{display:block}main{max-width:none;padding:0}h2{page-break-before:always}}
+</style>
+</head>
+<body>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button>
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+<div class="layout">
+<nav>
+<h2>Study guide</h2>
+<ol>
+<li><a href="#ch0">0 · How to use this guide</a></li>
+<li><a href="#ch1">1 · The problem and the threat model</a></li>
+<li><a href="#ch2">2 · Foundations you must master</a></li>
+<li class="sub"><a href="#ch2-request">2.1 The API request path</a></li>
+<li class="sub"><a href="#ch2-rbac">2.2 RBAC, cluster-admin, impersonation</a></li>
+<li class="sub"><a href="#ch2-deletion">2.3 How deletion really works</a></li>
+<li class="sub"><a href="#ch2-audit">2.4 Audit events</a></li>
+<li class="sub"><a href="#ch2-argocd">2.5 Argo CD reconciliation</a></li>
+<li><a href="#ch3">3 · Layer 1: identity and RBAC</a></li>
+<li><a href="#ch4">4 · Layer 2: Argo CD hardening</a></li>
+<li><a href="#ch5">5 · Layer 3: the admission policy</a></li>
+<li class="sub"><a href="#ch5-vap">5.1 ValidatingAdmissionPolicy anatomy</a></li>
+<li class="sub"><a href="#ch5-cel">5.2 CEL primer</a></li>
+<li class="sub"><a href="#ch5-contract">5.3 The annotation contract</a></li>
+<li class="sub"><a href="#ch5-rules">5.4 Rules V1–V4 walkthrough</a></li>
+<li class="sub"><a href="#ch5-bindings">5.5 Bindings and scoping</a></li>
+<li class="sub"><a href="#ch5-companions">5.6 Companion policies</a></li>
+<li class="sub"><a href="#ch5-reaper">5.7 The reaper</a></li>
+<li class="sub"><a href="#ch5-trace">5.8 Request traces</a></li>
+<li class="sub"><a href="#ch5-corners">5.9 Admission corner cases</a></li>
+<li><a href="#ch6">6 · Layer 4: self-protection</a></li>
+<li><a href="#ch7">7 · Layer 5: audit logging</a></li>
+<li><a href="#ch8">8 · Layer 6: detection</a></li>
+<li><a href="#ch9">9 · Layer 7: notification</a></li>
+<li><a href="#ch10">10 · Layer 8: backup and recovery</a></li>
+<li><a href="#ch11">11 · Git process</a></li>
+<li><a href="#ch12">12 · Rollout and operations</a></li>
+<li><a href="#ch13">13 · Gap analysis and implementations</a></li>
+<li><a href="#ch14">14 · Corner-case catalogue</a></li>
+<li><a href="#ch15">15 · Self-assessment</a></li>
+<li><a href="#ch16">16 · Glossary and references</a></li>
+</ol>
+</nav>
+<main>
+<h1>OpenShift 4.21 Guardrails: Study Guide</h1>
+<p class="lead">Audit trail, a two-person rule for deleting critical resources, red alerting to email and Microsoft Teams, and recovery, for a cluster running OpenShift GitOps. Written so that a working OpenShift administrator can become the person who designs, defends and operates this class of control.</p>
+<p><small>Companion to the repository <code>openshift-administration</code>. File references are relative to its root. Verified against OpenShift 4.21 (Kubernetes 1.34), Alertmanager 0.29.0, OpenShift GitOps 1.19+, OpenShift Logging 6.x, Loki Operator 6.x, OADP 1.5. Placeholders (<code>guardrails.example.com</code>, <code>example-org</code>) are as in the repository.</small></p>
+
+<h2 id="ch0">0 · How to use this guide</h2>
+<p>The guide is sequential. Chapters 1 and 2 give the problem and the Kubernetes mechanics that the design depends on. Chapters 3 to 10 walk through the eight layers in the order a request meets them. Chapter 13 is a gap analysis: everything that the review of corner cases found missing, with the implementation that was added to the repository. Chapter 14 is a catalogue of every corner case with the observed behaviour and what to do. Chapter 15 is a self-assessment.</p>
+<div class="box"><span class="t">Conventions</span>
+<b>Corner case</b> boxes describe behaviour that surprises people. <b>Gap</b> boxes describe something that was missing and is now implemented. Commands are shown as an operator would type them; <code>→</code> introduces expected output. Where the repository has the authoritative file, its path is named; read the file alongside the chapter.</div>
+<h3>Learning path</h3>
+<table><tr><th>Stage</th><th>Read</th><th>Do</th><th>You can now</th></tr>
+<tr><td>Foundations</td><td>Ch. 1–2</td><td>Trace a delete request through the API server on a lab cluster with the audit log open</td><td>explain why RBAC cannot stop cluster-admin and admission can</td></tr>
+<tr><td>Prevention</td><td>Ch. 3–6</td><td>Apply phase 1 on a lab cluster; run <code>scripts/test-guardrails.sh</code>; read every denial message</td><td>read and modify CEL policies safely</td></tr>
+<tr><td>Detection</td><td>Ch. 7–9</td><td>Follow one deletion from audit event to Teams card, timing each hop</td><td>write a LogQL alert on any audit condition</td></tr>
+<tr><td>Recovery and operations</td><td>Ch. 10–12</td><td>Do a restore drill and a break-glass rehearsal</td><td>run the control in production</td></tr>
+<tr><td>Expert</td><td>Ch. 13–15</td><td>Reproduce every corner case; answer the self-assessment without notes</td><td>design the same control for another critical system</td></tr></table>
+
+<h2 id="ch1">1 · The problem and the threat model</h2>
+<h3>1.1 What goes wrong without it</h3>
+<p>An OpenShift cluster running Argo CD has a handful of objects whose deletion is catastrophic and, by default, one command away for anyone with <code>cluster-admin</code>:</p>
+<table><tr><th>Command</th><th>Consequence</th><th>Time to notice by default</th></tr>
+<tr><td><code>oc delete ns openshift-gitops</code></td><td>Argo CD instance, every <code>Application</code>, every <code>AppProject</code>, repo and cluster credentials gone. Applications with the cascade finalizer delete the workloads they manage on the way out.</td><td>Minutes to hours, when deployments stop or workloads vanish</td></tr>
+<tr><td><code>oc delete crd applications.argoproj.io</code></td><td>Every Application object cluster-wide is deleted by the API server itself (CRD deletion cascades). With finalizers present, cascade deletion of workloads.</td><td>Same</td></tr>
+<tr><td><code>oc delete application my-prod-app</code> (with finalizer)</td><td>Argo CD deletes every resource the app manages: Deployments, Services, PVCs.</td><td>Immediately, as an outage</td></tr>
+<tr><td><code>oc delete csv openshift-gitops-operator.v1.19.0 -n openshift-gitops-operator</code></td><td>Operator removed; instance stops being reconciled; next upgrade or repair impossible until reinstalled.</td><td>Days</td></tr>
+<tr><td><code>oc patch apiserver cluster ... audit.profile=None</code></td><td>Audit trail stops; every subsequent action is unattributable.</td><td>Never, unless someone looks</td></tr>
+<tr><td>Merge a PR that deletes a manifest, auto-sync with prune</td><td>Same as a manual delete, performed by a service account, at machine speed.</td><td>Minutes</td></tr></table>
+<p>Each of these is one identity, one action, no second pair of eyes, and by default no alert. Backups make the cluster recoverable, but recovery is measured in tens of minutes to hours of outage plus the forensic work of finding out what happened.</p>
+
+<h3>1.2 Requirements</h3>
+<table><tr><th>#</th><th>Requirement</th><th>What it must mean in practice</th></tr>
+<tr><td>R1</td><td>Every edit and deletion is auditable: which resource, by whom</td><td>Personal identity, exact object, the change itself (request body), timestamp, source, tamper-evident storage, retention that satisfies the regulator</td></tr>
+<tr><td>R2</td><td>A critical resource cannot be deleted by a single user, even cluster-admin</td><td>Technical enforcement at a point that <code>cluster-admin</code> cannot skip; at least two other people must act</td></tr>
+<tr><td>R3</td><td>Argo CD in particular needs multiple approvers</td><td>All three deletion paths (the instance, through Argo CD, via Git) are covered</td></tr>
+<tr><td>R4</td><td>Any deletion, accidental or approved, alerts email and Teams so the team acts immediately</td><td>Seconds, not minutes; two channels; keeps paging until acknowledged; detects tampering with the detection itself</td></tr>
+<tr><td>R5</td><td>Backups exist, but prevention is still required</td><td>Prevention and detection reduce the number and blast radius of restores</td></tr>
+<tr><td>R6</td><td>Cover what was not asked but a production design needs</td><td>Identity hygiene, self-protection of the control, safe rollout, tests, runbooks, compliance evidence, honest residual risk</td></tr></table>
+
+<h3>1.3 Actors and scenarios</h3>
+<table><tr><th>Scenario</th><th>Actor</th><th>Likelihood</th><th>Layer that stops or catches it</th></tr>
+<tr><td>Wrong-context <code>oc delete</code></td><td>well-meaning admin</td><td>high</td><td>admission denies; alert</td></tr>
+<tr><td>Application deleted with cascade finalizer</td><td>admin, CI job</td><td>high</td><td>finalizer removed; Application labelled critical; Argo CD RBAC denies delete</td></tr>
+<tr><td>Manifest removed from Git, pruned</td><td>developer via PR</td><td>medium</td><td><code>prune: false</code>; Argo CD SA not exempt; 2-reviewer ruleset</td></tr>
+<tr><td>Malicious or compromised cluster-admin</td><td>insider / attacker</td><td>low, high impact</td><td>admission applies to <code>system:masters</code>; impersonation alerted; no standing cluster-admin</td></tr>
+<tr><td>Disable the guardrail first, then act</td><td>capable attacker</td><td>low</td><td>policy objects critical; RBAC-locked; self-healed; P1 alert; Git ruleset</td></tr>
+<tr><td>Blind detection first</td><td>capable attacker</td><td>low</td><td>audit objects critical; metrics-based alert on ingestion stall</td></tr>
+<tr><td>Controller bug or cascade (GC, namespace controller, OLM)</td><td>system</td><td>medium</td><td>controllers are not exempt; parents protected so cascades cannot start</td></tr>
+<tr><td>Three people collude</td><td>insiders</td><td>very low</td><td>out of scope for software; audited, recertified</td></tr>
+<tr><td>Node or etcd access</td><td>infrastructure admin</td><td>low</td><td>residual; SSH lockdown, etcd encryption, exec alert (Ch. 13)</td></tr></table>
+
+<h3>1.4 The eight layers</h3>
+<div class="diagram">  request ──▶ [1 Identity/RBAC] ──▶ [3 Admission policy] ──▶ etcd
+                                          │
+                                          ▼ (every request, allowed or denied)
+                                   [5 Audit log] ──▶ SIEM (record) + Loki (alerting)
+                                          │
+              [2 Argo CD hardening]       ▼
+              [4 Self-protection]  [6 Detection: audit rules + metrics rules]
+                                          ▼
+                                   [7 Alertmanager ──▶ Email + Teams]
+              [8 Recovery: Git, OADP, etcd snapshots]   (independent of all above)</div>
+<p>Prevention (1–4), detection (5–7) and recovery (8) are independent: each can fail without taking the others with it. Within detection, the audit pipeline and the metrics pipeline are independent as well. That independence is the single most important property of the design; keep it when you extend it.</p>
+
+<h2 id="ch2">2 · Foundations you must master</h2>
+<p>The design leans on precise behaviour of the Kubernetes API server, RBAC, deletion semantics, audit logging and Argo CD. Get these right and every later chapter becomes obvious.</p>
+
+<h3 id="ch2-request">2.1 The API request path</h3>
+<div class="diagram">client ─▶ TLS ─▶ Authentication ─▶ Authorization (RBAC) ─▶ Mutating admission ─▶ Schema validation
+                (who?)              (may this identity do this verb on this kind?)   (webhooks, defaults)
+        ─▶ Validating admission ─▶ etcd write ─▶ Audit event "ResponseComplete"
+           (VAP + validating webhooks: is THIS request acceptable?)</div>
+<div class="steps">
+<div class="step"><b>Authentication</b> produces <code>UserInfo</code>: <code>username</code>, <code>groups</code>, <code>uid</code>, <code>extra</code>. For an OAuth login through the IdP, <code>username</code> is the identity the provider mapped (for OIDC usually the email) and groups include <code>system:authenticated</code>, <code>system:authenticated:oauth</code> and the OpenShift <code>Group</code> objects the user is in. For a service account, <code>system:serviceaccount:&lt;ns&gt;:&lt;name&gt;</code> with groups <code>system:serviceaccounts</code> and <code>system:serviceaccounts:&lt;ns&gt;</code>.</div>
+<div class="step"><b>Authorization</b> is a yes/no on (identity, verb, group, resource, namespace, name). RBAC is additive: any matching rule allows. There is no deny rule. The <code>cluster-admin</code> ClusterRole is <code>verbs: ["*"], resources: ["*"], apiGroups: ["*"]</code>, and the group <code>system:masters</code> is short-circuited to allowed before RBAC is even consulted.</div>
+<div class="step"><b>Admission</b> runs only for writes (create, update, patch, delete, connect). Mutating plugins first (may change the object), then validating plugins (may only accept or reject). <code>ValidatingAdmissionPolicy</code> is an in-process validating plugin: its CEL expressions run inside kube-apiserver with the same request context, for <em>every</em> authenticated identity. Authorization skipping for <code>system:masters</code> does not extend to admission.</div>
+<div class="step"><b>Persist</b>, then the audit event is completed with the response code and any annotations that admission plugins attached.</div></div>
+<div class="box"><span class="t">Why this matters</span> RBAC answers "may alice delete argocds?", and for cluster-admin the answer is always yes. Admission answers "may <em>this</em> delete of <em>this</em> object happen <em>now</em>?", and can say no to anyone. That is the entire reason the control is an admission policy and not a role.</div>
+
+<h3 id="ch2-rbac">2.2 RBAC, cluster-admin and impersonation</h3>
+<ul>
+<li><b>Verbs</b>: <code>get list watch create update patch delete deletecollection</code>. <code>patch</code> cannot be limited to certain fields. If approvers may patch an object, RBAC lets them patch <em>anything</em> in it; the admission policy is what limits the content.</li>
+<li><b>cluster-admin bindings</b>: the default <code>cluster-admin</code> ClusterRoleBinding binds the group <code>system:masters</code>. The installer's <code>system:admin</code> user (client certificate in <code>auth/kubeconfig</code>) is in that group. <code>kubeadmin</code> is a bootstrap user bound to cluster-admin through <code>system:cluster-admins</code>. Both bypass the IdP.</li>
+<li><b>Impersonation</b>: a request with headers <code>Impersonate-User</code> / <code>Impersonate-Group</code> (<code>oc --as</code>, <code>--as-group</code>) is authorised for the <em>impersonate</em> verb on <code>users</code>/<code>groups</code>, then processed as the impersonated identity. Admission sees the impersonated identity in <code>request.userInfo</code>, so a policy cannot tell an impersonated approver from a real one. The audit event records both: <code>user</code> is the <em>original</em> authenticated user and <code>impersonatedUser</code> is the identity that was assumed. The audit log is the only place the truth survives, which is why any write via impersonation is alerted.</li>
+<li><b>Escalation prevention</b>: RBAC forbids granting permissions you do not hold (except with the <code>escalate</code> verb) and binding roles you cannot <code>bind</code>. cluster-admin holds everything, so it can always grant itself or others; hence changes to privileged bindings are alerted.</li></ul>
+<div class="corner"><span class="t">Corner case: `system:masters` cannot be restricted by RBAC at all</span> Authorization for that group is decided before the RBAC authorizer runs. The only controls that apply to it are admission and audit. Keep the population of certificate holders in that group at zero (vault the installer kubeconfig).</div>
+
+<h3 id="ch2-deletion">2.3 How deletion really works</h3>
+<div class="steps">
+<div class="step"><b>DELETE request</b> → authn → authz (<code>delete</code> verb) → admission with <code>operation: DELETE</code>, <code>oldObject</code> = the current object, <code>object</code> = null → if admitted, the API server sets <code>metadata.deletionTimestamp</code>.</div>
+<div class="step"><b>No finalizers</b> → the object is removed from etcd immediately. <b>Finalizers present</b> → the object stays, with a deletion timestamp, until every controller that owns a finalizer removes its entry. Removing a finalizer is an UPDATE (patch) on the object. Anyone with <code>patch</code> can strip finalizers, which is why finalizers are not a security control.</div>
+<div class="step"><b>Garbage collection</b>: objects with <code>ownerReferences</code> are deleted by the garbage collector (<code>system:serviceaccount:kube-system:generic-garbage-collector</code>) when the owner is gone (background) or before the owner is removed (foreground). Each of those is a normal DELETE request that passes through admission.</div>
+<div class="step"><b>Namespace deletion</b>: the namespace enters <code>Terminating</code>; the namespace controller (<code>system:serviceaccount:kube-system:namespace-controller</code>) lists every resource kind and issues <code>deletecollection</code>/DELETE for each object. Admission sees one DELETE per object. If any is denied, the namespace stays Terminating (the <code>NamespaceContentRemaining</code> condition names the kind).</div>
+<div class="step"><b>CRD deletion</b>: deleting a CRD deletes every custom resource of that kind cluster-wide (the CRD gets a <code>customresourcecleanup.apiextensions.k8s.io</code> finalizer while this runs). This is the single most destructive delete available.</div>
+<div class="step"><b>deletecollection</b> (<code>oc delete cm -l app=x</code>): the API server converts it into individual deletes for admission; a policy sees each object.</div>
+<div class="step"><b>dry-run</b> (<code>--dry-run=server</code>): the full path including admission runs; only the etcd write is skipped. This is how tests probe real critical objects safely.</div></div>
+<div class="corner"><span class="t">Corner case: a denied namespace-controller delete wedges the namespace</span> If a namespace contains a critical object and someone deletes the namespace, the namespace is accepted for deletion (it is not itself critical) but the controller cannot remove the critical object and the namespace stays Terminating. This is intended (a namespace deletion must not take a critical object with it). Resolution: run the approval workflow on the object, or remove its critical label through the workflow. Chapter 13 adds a policy that prevents tenants from creating this situation on purpose.</div>
+
+<h3 id="ch2-audit">2.4 Audit events</h3>
+<p>Every request produces an audit event at one of four levels: <code>None</code>, <code>Metadata</code> (who, what, verb, result), <code>Request</code> (+ request body), <code>RequestResponse</code> (+ response body). The audit <em>policy</em> picks the level per rule. OpenShift exposes three profiles via <code>APIServer/cluster</code>: <code>Default</code> (Metadata for everything, except OAuth tokens), <code>WriteRequestBodies</code> (bodies for writes), <code>AllRequestBodies</code> (bodies for reads too), plus <code>customRules</code> per group that take precedence over the top-level profile. Red Hat's policy keeps Secrets, ConfigMaps, Routes and OAuth clients at Metadata even for write profiles so credentials do not land in logs.</p>
+<p>Three API servers write audit logs on each control-plane node: <code>kube-apiserver</code> (<code>/var/log/kube-apiserver/audit.log</code>), <code>openshift-apiserver</code> (projects, routes, builds, images) and <code>oauth-apiserver</code> (tokens, identities). A request to <code>oc delete project x</code> hits openshift-apiserver, which deletes the namespace through kube-apiserver with the user's identity preserved.</p>
+<p>The event fields the design relies on:</p>
+<pre><code>verb                      delete | create | update | patch | get | list | watch
+user.username / groups    authenticated identity (after impersonation, the ORIGINAL user)
+impersonatedUser.username the assumed identity, only when --as was used
+objectRef.{apiGroup,resource,namespace,name,subresource}
+responseStatus.code       200/201 allowed, 403 denied by admission or RBAC, 422 invalid
+requestObject             the body for writes (WriteRequestBodies)
+annotations."authorization.k8s.io/decision"   allow | forbid
+annotations."authorization.k8s.io/reason"     which binding allowed it
+annotations."validation.policy.admission.k8s.io/validation_failure"   JSON with policy, binding, message (when a VAP validation failed and the binding has Audit)
+annotations."&lt;policy-name&gt;/&lt;key&gt;"          custom auditAnnotations from the policy</code></pre>
+<div class="corner"><span class="t">Corner case: audit annotations are attached even when the request is allowed</span> The policy's <code>auditAnnotations</code> run on every evaluated request, and the <code>validation_failure</code> annotation is added whenever a validation fails and <code>Audit</code> is among the binding's actions, regardless of whether <code>Deny</code> is also present. Phase 1 (audit only) therefore produces complete evidence of what phase 3 would have blocked.</div>
+
+<h3 id="ch2-argocd">2.5 Argo CD reconciliation</h3>
+<ul>
+<li>An <code>Application</code> points at a Git path; the application-controller (SA <code>openshift-gitops-argocd-application-controller</code>) computes desired vs live state and, with <code>automated</code> sync, applies the diff. <b>Prune</b> deletes live objects that are no longer in Git. <b>selfHeal</b> re-applies Git when live drifts.</li>
+<li>The <b>cascade finalizer</b> <code>resources-finalizer.argocd.argoproj.io</code> on an Application means "when this Application is deleted, delete everything it manages first". Without it, deleting the Application orphans the resources (they keep running).</li>
+<li><code>ApplicationSet.spec.syncPolicy.preserveResourcesOnDeletion: true</code> stops the ApplicationSet controller from adding that finalizer to <em>new</em> Applications it generates; existing ones keep whatever they have.</li>
+<li><b>Server-side apply</b> (<code>ServerSideApply=true</code>) makes Argo CD a field manager that owns only the fields present in Git; fields added by others (like approval annotations) are left alone and do not show as drift. With client-side apply, Argo CD compares against <code>last-applied-configuration</code> and extra live annotations are also ignored, but <code>Replace=true</code> would wipe them. Never use <code>Replace</code> on critical objects.</li>
+<li>Argo CD has its own RBAC (<code>policy.csv</code>) evaluated by <code>argocd-server</code> for UI/CLI actions. A user denied <code>applications, delete</code> there never produces an API request. Argo CD's Kubernetes requests are made by its service accounts, not by the logged-in user, so cluster-side attribution of a UI action is "the argocd-server SA"; the Argo CD audit log (or the Argo CD UI's history) names the human. Keep Argo CD SSO on the cluster's IdP so both names match.</li>
+<li>Argo CD writes to Application objects in three ways: the application-controller sets <code>status</code> (status subresource), the server sets <code>.operation</code> (a top-level field, not a subresource) when a sync is started from the UI/CLI and adds/removes the annotation <code>argocd.argoproj.io/refresh</code> on refresh; the applicationset-controller creates and updates generated Applications. All three identities must be trusted mutators (Chapter 13, gap G3).</li></ul>
+
+<h2 id="ch3">3 · Layer 1: identity and RBAC</h2>
+<p>Files: <code>manifests/00-namespaces-and-groups/groups.yaml</code>, <code>manifests/02-rbac/*</code>, <code>manifests/07-hardening-extras/oauth-token-config.yaml</code>, <code>docs/03</code>.</p>
+<h3>3.1 Why the guardrail is only as strong as identity</h3>
+<p>The policy trusts <code>request.userInfo.username</code> and <code>groups</code>. If usernames are shared, if groups are hand-edited, or if a super-user can silently become an approver, the two-person rule collapses to one person. So the first layer makes every actor a named human from the identity provider, removes standing super-user access, and makes the remaining super-user paths loud.</p>
+<h3>3.2 Step by step</h3>
+<div class="steps">
+<div class="step"><b>Connect the IdP</b> (OIDC/Entra ID, LDAP, GitHub Enterprise) in the <code>OAuth/cluster</code> object; confirm a login produces a stable, personal username (<code>oc whoami</code> → <code>alice@example.com</code>). Approval entries embed this string, so it must not change per session.</div>
+<div class="step"><b>Own the groups from the directory.</b> Either an OIDC <code>groups</code> claim or <code>oc adm group sync</code> on a schedule (Chapter 13, G7 has the CronJob). The five groups are the contract:
+<table><tr><th>Group</th><th>Purpose</th><th>Cluster RBAC</th><th>Argo CD RBAC</th></tr>
+<tr><td><code>platform-admins</code></td><td>emergency and major changes; <b>empty at rest</b>, membership just-in-time</td><td><code>cluster-admin</code> (still subject to the policy)</td><td><code>role:admin</code></td></tr>
+<tr><td><code>gitops-deletion-approvers</code></td><td>approve deletions; ≥ 4 people across ≥ 2 teams</td><td><code>guardrails-approver</code>: get/list/watch/<b>patch</b>, no delete</td><td><code>role:readonly</code></td></tr>
+<tr><td><code>gitops-deletion-requesters</code></td><td>open and execute deletions</td><td><code>guardrails-approver</code> + <code>guardrails-executor</code> (delete)</td><td>–</td></tr>
+<tr><td><code>gitops-operators</code></td><td>day-2 Argo CD operations</td><td>none beyond Argo CD</td><td><code>role:operator</code> (no delete)</td></tr>
+<tr><td><code>auditors</code></td><td>read-only plus logs</td><td><code>cluster-reader</code></td><td>project <code>readonly</code></td></tr></table></div>
+<div class="step"><b>Remove <code>kubeadmin</code></b> after an IdP admin login works: <code>oc delete secret kubeadmin -n kube-system</code>. Any later use of <code>kube:admin</code> raises <code>KubeadminOrSystemAdminUsed</code>.</div>
+<div class="step"><b>Vault the installer kubeconfig</b> (<code>system:admin</code>, group <code>system:masters</code>). Dual-control storage; every use is a P1 alert.</div>
+<div class="step"><b>No <code>User</code> subjects on <code>cluster-admin</code>.</b> Only the <code>platform-admins</code> group and the break-glass service account are bound. <code>scripts/verify-install.sh</code> counts violations.</div>
+<div class="step"><b>Break-glass is a service account</b>, <code>guardrails-system/breakglass</code>, bound to cluster-admin and listed in <code>exemptUsers</code>. Its token is minted with <code>oc create token breakglass -n guardrails-system --duration=1h</code> by two custodians and never stored. Every request raises <code>BreakGlassUsed</code>.</div>
+<div class="step"><b>Shorter sessions</b>: <code>OAuth.spec.tokenConfig</code> with 8 h maximum age and 2 h inactivity (G5).</div></div>
+<h3>3.3 Why RBAC still matters</h3>
+<p>The policy only denies; it never grants. RBAC decides who may touch a critical object at all. Approvers get <code>patch</code> so they can append their entry; executors get <code>delete</code>; nobody else gets either on the protected kinds. Separating "can approve" from "can execute" into two ClusterRoles is what makes the executor a third person in practice.</p>
+<div class="corner"><span class="t">Corner case: cluster-admin can impersonate an approver</span> <code>oc --as=a1@example.com --as-group=gitops-deletion-approvers annotate ...</code> is authorised for cluster-admin and admission sees a1. Nothing in-process can distinguish it. The controls are: no standing cluster-admin for humans (JIT), the audit event's <code>impersonatedUser</code> field, and the <code>ImpersonationUsed</code> P1 alert. A forged approval is therefore always provable after the fact and always noisy at the time. Keep the <code>impersonate</code> verb out of every custom role.</div>
+<div class="corner"><span class="t">Corner case: group sync lag</span> A newly added approver is denied until the sync runs (<code>isApprover</code> is false). Check <code>oc get group gitops-deletion-approvers -o jsonpath='{.users}'</code> before assuming a policy bug.</div>
+
+<h2 id="ch4">4 · Layer 2: Argo CD hardening</h2>
+<p>Files: <code>manifests/04-argocd/*</code>, <code>docs/05</code>.</p>
+<h3>4.1 Three deletion paths, three controls</h3>
+<table><tr><th>Path</th><th>Example</th><th>Control</th></tr>
+<tr><td>Delete Argo CD itself</td><td>CR, namespace, operator, CRDs</td><td>admission policy (name-protected), alerts, backups</td></tr>
+<tr><td>Delete <em>through</em> Argo CD</td><td>Application with cascade finalizer; ApplicationSet</td><td>no cascade finalizer, <code>preserveResourcesOnDeletion</code>, Argo CD RBAC <code>delete: deny</code>, Applications labelled critical</td></tr>
+<tr><td>Delete <em>via Git</em></td><td>remove a manifest, auto-sync with prune</td><td><code>prune: false</code> for critical apps; the controller SA is not exempt, so a prune of a critical object is denied and alerted; 2-reviewer PRs</td></tr></table>
+<h3>4.2 The ArgoCD CR patch, field by field</h3>
+<table><tr><th>Field</th><th>Value</th><th>Why</th></tr>
+<tr><td><code>disableAdmin</code></td><td><code>true</code></td><td>no shared local password; every Argo CD action has a personal name</td></tr>
+<tr><td><code>sso.dex.openShiftOAuth</code></td><td><code>true</code></td><td>Argo CD identity = cluster identity = audit identity</td></tr>
+<tr><td><code>rbac.defaultPolicy</code></td><td><code>role:readonly</code></td><td>look but do not act by default</td></tr>
+<tr><td><code>rbac.policy</code></td><td><code>role:operator</code> with <code>applications, delete, deny</code>, <code>projects, delete, deny</code>, <code>exec, create, deny</code></td><td>operators cannot delete apps or exec into pods via Argo CD</td></tr>
+<tr><td><code>resourceExclusions</code></td><td><code>guardrails.example.com/*</code></td><td>no unrelated Application can adopt (and later prune) guardrail objects</td></tr>
+<tr><td><code>extraConfig.controller.diff.server.side</code></td><td><code>"true"</code></td><td>server-side diff; human-added approval annotations are not drift</td></tr>
+<tr><td><code>extraConfig.resource.customizations.ignoreDifferences.all</code></td><td>the three <code>delete-*</code> annotation pointers</td><td>belt and braces for the above</td></tr>
+<tr><td><code>server.route.tls.termination</code></td><td><code>reencrypt</code></td><td>TLS end to end</td></tr></table>
+<h3>4.3 The guardrails Application</h3>
+<pre><code>metadata: no finalizers                       # deleting the Application changes nothing on the cluster
+syncPolicy.automated: { prune: false, selfHeal: true }
+syncOptions: [Prune=false, ServerSideApply=true, ApplyOutOfSyncOnly=true, RespectIgnoreDifferences=true, PruneLast=true]
+ignoreDifferences: the three approval annotations on every kind; Group.users (owned by group sync)
+spec.source.path: manifests/overlays/&lt;phase&gt;   # THE phase switch</code></pre>
+<p>The AppProject <code>guardrails</code> pins <code>sourceRepos</code> to this repository, restricts destinations to the platform namespaces and whitelists exactly the cluster-scoped kinds this repository manages. A compromised application repository therefore cannot deploy a binding that neutralises the guardrail.</p>
+<div class="corner"><span class="t">Corner case: what happens when Git deletes a critical manifest</span> With <code>prune: false</code> the live object is reported OutOfSync/orphaned and nothing is deleted. A manual sync with prune makes the controller SA issue DELETE; rule V1 denies it (the SA is not exempt and there are no approvals), the sync fails with the GUARDRAIL message and <code>CriticalResourceDeleteDenied</code> fires with the SA as actor. Revert the PR.</div>
+<div class="corner"><span class="t">Corner case: the operator recreates the ArgoCD CR</span> The GitOps operator creates the default <code>ArgoCD/openshift-gitops</code> if it is missing. That is recovery, not a security hole: the CR is name-protected, the operator SA is a trusted mutator (G3) but not exempt from deletion.</div>
+<div class="corner"><span class="t">Corner case: additional Argo CD instances</span> Namespace-scoped instances in other namespaces have their own service accounts (<code>&lt;instance&gt;-argocd-application-controller</code> and so on). They are not trusted mutators until added to <code>gitopsServiceAccounts</code>, and their CR is only protected if labelled critical in Git (the name rule covers <code>openshift-gitops</code> only).</div>
+
+<h2 id="ch5">5 · Layer 3: the admission policy</h2>
+<p>Files: <code>manifests/03-guardrails/*</code>, <code>docs/04</code>. This is the core; read the YAML with this chapter open.</p>
+
+<h3 id="ch5-vap">5.1 ValidatingAdmissionPolicy anatomy</h3>
+<pre><code>apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy          # the logic (cluster-scoped)
+spec:
+  failurePolicy: Fail | Ignore           # what happens if an expression errors or params are missing
+  paramKind: { apiVersion, kind }        # optional: a parameter object type, exposed as `params`
+  matchConstraints.resourceRules[]       # which (group, resource, operations) reach this policy at all
+  matchConditions[]                      # cheap CEL pre-filters (cannot use `variables`)
+  variables[]                            # named CEL expressions, lazily evaluated, referenced as variables.&lt;name&gt;
+  validations[]                          # each must evaluate to true; false = validation failure
+    - expression, message | messageExpression, reason (Forbidden | Invalid | ...)
+  auditAnnotations[]                     # key + valueExpression (string or null); attached to the audit event
+---
+kind: ValidatingAdmissionPolicyBinding   # where and how hard it applies
+spec:
+  policyName
+  paramRef: { name | selector, parameterNotFoundAction: Allow | Deny }
+  matchResources: { namespaceSelector, objectSelector, resourceRules }   # further narrows the policy's match
+  validationActions: [Deny] | [Warn] | [Audit] | combinations</code></pre>
+<p>Variables available inside expressions: <code>object</code> (null on DELETE), <code>oldObject</code> (null on CREATE), <code>request</code> (operation, userInfo, resource, namespace, name, subResource), <code>params</code>, <code>namespaceObject</code>, <code>authorizer</code>, <code>variables</code>.</p>
+<table><tr><th>Concept</th><th>Behaviour that the design relies on</th></tr>
+<tr><td><code>validationActions</code></td><td><code>Deny</code> rejects with the message; <code>Warn</code> lets the request through and adds a <code>Warning:</code> header the client prints; <code>Audit</code> lets it through and adds <code>validation.policy.admission.k8s.io/validation_failure</code> to the audit event. They combine, which is what makes the phased rollout a one-field change.</td></tr>
+<tr><td><code>failurePolicy: Fail</code></td><td>A runtime CEL error (e.g. indexing a missing key without <code>has()</code>) becomes a denial. Safer for a guardrail, but every expression must guard its accesses. A cost-budget overrun is also an error.</td></tr>
+<tr><td><code>parameterNotFoundAction: Deny</code></td><td>If <code>GuardrailConfig/default</code> does not exist, matched requests are denied (fail closed). The bindings' scoping keeps the blast radius to critical objects.</td></tr>
+<tr><td><code>objectSelector</code> in a binding</td><td>Matched against the object's labels, <b>either</b> the new object <b>or</b> the old one. Removing the label in the same request still matches; DELETE requests match on the old object.</td></tr>
+<tr><td>Subresources</td><td><code>resources: ["applications"]</code> does not match <code>applications/status</code>. Status updates by controllers never reach the policy, which keeps evaluation cheap and avoids false denials.</td></tr>
+<tr><td>Multiple bindings</td><td>A request matching two bindings of the same policy is evaluated twice; harmless.</td></tr>
+<tr><td>Type checking</td><td>The API server compiles each expression against the schemas of up to ten matched kinds and reports <code>status.typeChecking.expressionWarnings</code>. For a policy matching many kinds, warnings like "undefined field spec" are expected; evaluation uses dynamic typing. Only a compile error in <code>status.conditions</code> is a problem.</td></tr>
+<tr><td>Cost budget</td><td>Each request has a CEL cost budget; nested list comprehensions over unbounded strings can exceed it. The design caps approvals at 32 entries and compares small structures. G4 adds an alert on <code>error_type="out_of_budget"</code>.</td></tr>
+<tr><td>No clock</td><td>There is no <code>now()</code> in Kubernetes CEL. Time-based rules must live elsewhere (the reaper).</td></tr></table>
+
+<h3 id="ch5-cel">5.2 CEL primer (what the policy uses)</h3>
+<pre><code>has(object.metadata.labels)                    # field presence; ALWAYS guard optional fields
+'k' in map                                     # key presence; ALWAYS guard before map['k']
+map['k'] == 'true'
+list.exists(x, cond) / list.all(x, cond) / list.filter(x, cond) / list.map(x, expr)
+list.size(), list[0], x in list, list1 + list2
+string.split(','), string.startsWith('p'), string.matches('^regex$'), list.join(',')
+string(n)                                      # int -> string for messages
+cond ? a : b                                   # ternary; `cond ? 'text' : null` for optional audit annotations
+a && b, a || b, !a                             # short-circuit: `false && error` is false, `true || error` is true
+request.operation == 'DELETE' ? oldObject : object</code></pre>
+<div class="box warn"><span class="t">Two habits that prevent 90 % of VAP incidents</span> Never index a map or list without checking presence first, and never touch <code>object</code> in a DELETE path or <code>oldObject</code> in a CREATE path without a guard on <code>request.operation</code>. Under <code>failurePolicy: Fail</code> an unguarded access denies the request.</div>
+
+<h3 id="ch5-contract">5.3 The annotation contract</h3>
+<table><tr><th>Key (<code>guardrails.example.com/</code>)</th><th>Written by</th><th>Format</th><th>Enforced by</th></tr>
+<tr><td><code>critical</code> (label)</td><td>Git via Argo CD, approvers, break-glass</td><td><code>"true"</code></td><td>label-control policy (add), rule V2 (remove)</td></tr>
+<tr><td><code>delete-request</code></td><td>requester</td><td><code>"&lt;ticket&gt;: &lt;reason&gt;"</code></td><td>V4</td></tr>
+<tr><td><code>delete-requested-by</code></td><td>requester</td><td>the requester's own username</td><td>V4 (must equal caller, caller in requester or approver groups)</td></tr>
+<tr><td><code>delete-approvals</code></td><td>each approver, one at a time</td><td><code>user|RFC3339Z,user|RFC3339Z</code> (comma-separated, <code>|</code> between user and time; usernames may contain <code>@</code> but not <code>|</code> or <code>,</code>)</td><td>V3 (append one entry naming yourself), reaper (expiry)</td></tr></table>
+<p>Why annotations on the target rather than a separate approval object: the approval trail is in the audit log of the very object; it disappears with the object; no controller is needed; and it sidesteps two VAP limitations (multi-parameter semantics and the missing clock).</p>
+
+<h3 id="ch5-rules">5.4 Rules V1–V4 walkthrough</h3>
+<p>All rules read the <b>pre-request</b> state (<code>oldObject</code>) for the security decision, so nothing changed in the same request can be exploited. Excerpts are from <code>vap-critical-delete.yaml</code>.</p>
+<h4>Variables that feed the rules</h4>
+<pre><code>labelCritical    = 'guardrails.example.com/critical' in oldLabels && oldLabels[...] == 'true'
+nameCritical     = namespaces in [openshift-gitops, openshift-gitops-operator, guardrails-system, openshift-logging, openshift-adp]
+                || CRDs whose spec.group in [argoproj.io, guardrails.example.com, loki.grafana.com, observability.openshift.io, velero.io, oadp.openshift.io]
+                || admissionregistration objects named guardrails-*   || anything in group guardrails.example.com
+                || Groups platform-admins / gitops-deletion-*         || rbac objects named guardrails-*
+                || anything in config.openshift.io                     || ArgoCD in namespace openshift-gitops
+                || OLM objects in openshift-gitops-operator            || ClusterExtension whose name contains 'gitops'
+isCritical       = labelCritical || nameCritical
+isExempt         = username in params.spec.exemptUsers
+isApprover       = groups.exists(g, g in params.spec.approverGroups)
+isRequester      = groups.exists(g, g in requesterGroups || g in approverGroups)
+oldApprovals     = split(oldAnn['delete-approvals'], ',')          oldApprovers = each entry before '|'
+addedApprovals   = newApprovals not in oldApprovals                 removedApprovals = oldApprovals not in newApprovals
+deletionApproved = oldRequestedBy != '' && oldRequest != ''
+                && distinct(oldApprovers) >= params.spec.minApprovers
+                && !(oldRequestedBy in oldApprovers)
+                && (params.spec.executorMayBeApprover || !(username in oldApprovers))
+onlyGuardrailAnnotationsChanged = labels equal && spec/data/rules/subjects/roleRef/users/webhooks equal
+                && every non-guardrail annotation equal in both directions</code></pre>
+<h4>V1 — DELETE</h4>
+<pre><code>!isCritical || isExempt || request.operation != 'DELETE' || deletionApproved</code></pre>
+<p>Reads as: the rule is satisfied unless this is a DELETE of a critical object by a non-exempt identity without the two-person rule met. The message names the object, the required count, the found count and the requester.</p>
+<h4>V2 — the critical label may not be removed</h4>
+<pre><code>!isCritical || isExempt || request.operation != 'UPDATE' || !labelCritical || newLabelCritical || deletionApproved</code></pre>
+<p>Removing the label is exactly as hard as deleting: "unlabel, then delete" gains nothing.</p>
+<h4>V3 — approvals integrity</h4>
+<pre><code>approvalsUnchanged
+|| newApprovals.size() == 0                                                  # cancel is always allowed
+|| (isReaper && addedApprovals.size() == 0 && requestUnchanged && onlyGuardrailAnnotationsChanged)   # reaper may only remove
+|| ( newApprovals.size() &lt;= 32
+     && addedApprovals.size() == 1 && removedApprovals.size() == 0 && newApprovals.size() == oldApprovals.size() + 1
+     && isApprover
+     && addedApprovals[0].matches('^[^|,]+\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
+     && addedApprovals[0].split('|')[0] == request.userInfo.username        # you can only sign as yourself
+     && !(request.userInfo.username in oldApprovers)                        # once
+     && newRequestedBy != '' && newRequest != ''                            # a request must exist
+     && request.userInfo.username != newRequestedBy                         # not your own request
+     && requestUnchanged && onlyGuardrailAnnotationsChanged )               # nothing else in the same write</code></pre>
+<h4>V4 — request integrity</h4>
+<pre><code>requestUnchanged
+|| ( newApprovals.size() == 0                                   # any change to the request wipes approvals
+     && onlyGuardrailAnnotationsChanged
+     && ( newRequestedBy == ''                                  # cancel
+          || (newRequestedBy == request.userInfo.username && isRequester && newRequest != '') ) )</code></pre>
+<p>Consequences worth stating: only the requester can edit the reason, and doing so resets approvals; the reason cannot be changed after approvals so approvals always refer to the justification the approvers saw; a cancel by anyone with patch rights is allowed because it can only make deletion harder.</p>
+<h4>Audit annotation</h4>
+<pre><code>guardrails-critical-delete/decision = "op=DELETE user=... groups=... requestedBy=... approvers=a|b approved=true|false exempt=true|false"</code></pre>
+<p>Emitted for every evaluated request on a critical object, allowed or denied. Detection keys off it.</p>
+
+<h3 id="ch5-bindings">5.5 Bindings and scoping</h3>
+<table><tr><th>Binding</th><th>Scope</th><th>Purpose</th></tr>
+<tr><td><code>guardrails-critical-delete-labelled</code></td><td><code>objectSelector: guardrails.example.com/critical=true</code>, all kinds in the policy</td><td>anything labelled; evaluation cost only on labelled objects</td></tr>
+<tr><td><code>guardrails-critical-delete-named</code></td><td>explicit low-traffic kinds (namespaces, CRDs, policies, groups, cluster RBAC, config.openshift.io, argocds, OLM), no selector</td><td>name-protected objects that carry no label</td></tr></table>
+<p>The consequence of this split: the cluster's ordinary Secret and ConfigMap churn never evaluates the policy, and a missing <code>GuardrailConfig</code> (fail closed) blocks only critical objects and the named kinds, never application workloads.</p>
+
+<h3 id="ch5-companions">5.6 Companion policies</h3>
+<table><tr><th>Policy</th><th>Operations</th><th>Rule</th><th>Actions by phase</th></tr>
+<tr><td><code>guardrails-critical-label-control</code> <span class="tag">added in G1</span></td><td>CREATE, UPDATE</td><td>only <code>gitopsServiceAccounts</code>, <code>exemptUsers</code> or approvers may <em>add</em> the critical label</td><td>1 Audit · 2 Warn · 3+ Deny</td></tr>
+<tr><td><code>guardrails-gitops-only-mutation</code></td><td>UPDATE</td><td>critical objects may only be <em>changed</em> by trusted identities; humans may only touch the guardrail annotations</td><td>1–3 Audit · 4 Deny</td></tr>
+<tr><td><code>guardrails-rbac-escalation-audit</code></td><td>CREATE, UPDATE, DELETE on bindings and groups</td><td>"fails" (never denies) on bindings to privileged ClusterRoles or changes to privileged groups so the audit event is stamped and the client warned</td><td>always Warn + Audit</td></tr></table>
+
+<h3 id="ch5-reaper">5.7 The reaper</h3>
+<p>CEL has no clock, so <code>approvalTTL</code> is enforced by a CronJob (<code>guardrails-system/approval-reaper</code>, every 10 minutes) that lists every protected kind, parses <code>delete-approvals</code>, and removes entries that are older than the TTL <b>or more than five minutes in the future or unparseable</b> (G2). Its service account is in <code>reaperUsers</code>, which V3 permits to remove entries and nothing else; its ClusterRole has no <code>delete</code> verb. A stolen reaper token can therefore neither approve nor delete.</p>
+
+<h3 id="ch5-trace">5.8 Request traces</h3>
+<h4>Trace A — cluster-admin deletes the ArgoCD CR</h4>
+<div class="diagram">oc delete argocd openshift-gitops -n openshift-gitops          (admin@example.com, groups: platform-admins, system:authenticated:oauth)
+ authn  ✓ admin@example.com
+ authz  ✓ cluster-admin allows delete argocds
+ admission: policy guardrails-critical-delete, binding -named (argocds in openshift-gitops)
+   nameCritical = true (argocds && ns openshift-gitops)      isExempt = false
+   oldRequestedBy = ''  oldApprovers = []  deletionApproved = false
+   V1: !true || false || false || false  → FALSE  → Deny
+ response 403 Forbidden "GUARDRAIL DENIED: deleting critical argocds openshift-gitops/openshift-gitops requires ... (found 0, ...)"
+ audit event: verb=delete rc=403 annotations: decision="op=DELETE user=admin@... approved=false exempt=false",
+              validation_failure=[{policy: guardrails-critical-delete, binding: -named, ...}]
+ Loki rule CriticalResourceDeleteDenied → Alertmanager → Teams (warning)</div>
+<h4>Trace B — the full workflow on a labelled ConfigMap</h4>
+<div class="diagram">1 req@example.com  annotate delete-request="CHG1: x" delete-requested-by=req@example.com delete-approvals-
+    V3: approvals '' → '' unchanged ✓     V4: requestUnchanged=false → approvals empty ✓, only guardrail ann changed ✓,
+        newRequestedBy == caller ✓, isRequester ✓, reason non-empty ✓  → allowed (200)
+2 a1@example.com   annotate delete-approvals="a1@example.com|2026-09-18T10:20:31Z"
+    V3: added=1 removed=0 size old+1 ✓ isApprover ✓ regex ✓ names caller ✓ not already ✓ request exists ✓ not requester ✓ unchanged ✓ → 200
+3 req@example.com  delete       → V1: approvers=1 &lt; 2 → 403 "found 1"
+4 a2@example.com   annotate delete-approvals="a1@...|...,a2@example.com|2026-09-18T10:25:02Z"   → 200
+5 a1@example.com   delete       → V1: executor in approvers → 403
+6 req@example.com  delete       → V1: request ✓ 2 distinct ✓ requester ∉ approvers ✓ executor ∉ approvers ✓ → 200, object gone
+   audit: decision="... approvers=a1@example.com|a2@example.com approved=true exempt=false"
+   Loki rule CriticalResourceDeleted → Alertmanager → Email + Teams (critical, group_wait 0s)</div>
+
+<h3 id="ch5-corners">5.9 Admission corner cases</h3>
+<div class="corner"><span class="t">DELETE has no <code>object</code></span> Every expression that touches <code>object</code> is guarded by <code>request.operation == 'UPDATE' &amp;&amp; ...</code>; the security decision always reads <code>oldObject</code>.</div>
+<div class="corner"><span class="t">Mutating webhooks run first</span> A mutating webhook (for example a policy engine that injects annotations or labels) changes <code>object</code> before this policy sees it. On an approval write that would make "nothing else changed" false and deny the approval. If you run such a webhook, exclude the guardrail kinds from it or extend <code>nonGuardrailAnnotationsUnchanged</code> to ignore the injected keys.</div>
+<div class="corner"><span class="t">Garbage collector retries forever</span> If a critical object has an <code>ownerReference</code> to a non-critical parent and the parent is deleted, the GC's DELETE is denied every few seconds and <code>CriticalResourceDeleteDenied</code> fires repeatedly with the GC as actor. Do not put ownerReferences on critical objects; if it happens, either approve the deletion or remove the ownerReference through the workflow.</div>
+<div class="corner"><span class="t">OLM operator upgrades</span> OLM updates Subscriptions and CSVs in <code>openshift-gitops-operator</code>; those kinds are not in the gitops-only policy's constraints, and V3/V4 pass because guardrail annotations are unchanged. Upgrades are unaffected.</div>
+<div class="corner"><span class="t">Controllers that write labels on critical objects</span> The label-control policy denies a label <em>addition</em> by an untrusted identity. A controller that re-applies an existing label is unaffected (old already had it). A controller that adds it for the first time must be in <code>gitopsServiceAccounts</code>.</div>
+<div class="corner"><span class="t">Two approvals in one patch</span> Denied: V3 requires exactly one added entry per request, naming the caller. Two humans cannot sign the same request.</div>
+<div class="corner"><span class="t">Approval by a service account</span> A service account is in <code>system:serviceaccounts:*</code> groups, never in the approver group, so <code>isApprover</code> is false. Automation cannot approve. If you ever need machine approvals (you should not), you would add the SA's group, which the reviewer agent and CI would flag.</div>
+<div class="corner"><span class="t">Username characters</span> The entry regex forbids <code>|</code> and <code>,</code> in usernames. OIDC emails are fine. If your IdP produces usernames containing those characters, change the separators in the policy, <code>scripts/lib.sh</code>, the reaper and the docs together.</div>
+<div class="corner"><span class="t">HyperShift / hosted control planes</span> VAP runs in the hosted kube-apiserver identically. Audit log configuration and shipping differ (managed by the hosting platform); the alerting rules need the audit stream wherever it lands.</div>
+
+<h2 id="ch6">6 · Layer 4: self-protection</h2>
+<p>The first move of a capable attacker (or a frustrated administrator) is to switch the control off. Five independent layers make that loud and reversible:</p>
+<table><tr><th>#</th><th>Layer</th><th>Mechanism</th><th>What an attacker sees</th></tr>
+<tr><td>1</td><td>Critical by name</td><td>Policies, bindings, <code>GuardrailConfig</code>, <code>guardrails-*</code> RBAC and the approver groups match <code>nameCritical</code>; V1 applies to them</td><td><code>oc delete vapb guardrails-critical-delete-named</code> → GUARDRAIL DENIED (to be confirmed on your build: residual risk R3)</td></tr>
+<tr><td>2</td><td>RBAC</td><td>No human role has update/delete on <code>admissionregistration.k8s.io</code> or <code>guardrails.example.com</code>; only Argo CD SAs and break-glass do</td><td>RBAC Forbidden</td></tr>
+<tr><td>3</td><td>Argo CD self-heal</td><td>the <code>guardrails</code> Application re-applies Git within the reconcile interval; <code>prune: false</code> and no finalizer mean deleting the Application changes nothing</td><td>their change reverts within ~3 min</td></tr>
+<tr><td>4</td><td>Alert</td><td><code>GuardrailPolicyModified</code> (P1) on any write to these objects by anyone but Argo CD; <code>GuardrailPolicyEvaluationErrors</code> (G4) on runtime errors</td><td>the security channel lights up</td></tr>
+<tr><td>5</td><td>Git</td><td>ruleset with no bypass, two approvals, code-owner review including security; CI invariants reject weakening</td><td>cannot merge alone</td></tr></table>
+<div class="corner"><span class="t">Corner case: does a VAP evaluate deletes of its own bindings?</span> Kubernetes deliberately avoids some self-referential admission paths. Whether the policy sees DELETE of <code>validatingadmissionpolicybindings</code> on your build must be observed (test T3.7). If it does not, layers 2–5 hold: a non-admin is RBAC-forbidden, an admin's deletion is reverted by Argo CD within minutes and alerted immediately. Record the finding in the residual-risk register either way.</div>
+<div class="corner"><span class="t">Corner case: `validationActions: []`</span> An empty action list makes a binding a no-op without deleting it. It is an UPDATE to a critical object: flagged in phases 1–3 (<code>ArgoCDDirectMutation</code>), denied in phase 4 by the gitops-only policy, alerted by <code>GuardrailPolicyModified</code> in all phases, and reverted by self-heal. CI refuses to merge it.</div>
+
+<h2 id="ch7">7 · Layer 5: audit logging</h2>
+<p>Files: <code>manifests/01-audit/*</code>, <code>docs/02</code>.</p>
+<h3>7.1 Decisions</h3>
+<table><tr><th>Decision</th><th>Value</th><th>Reason</th></tr>
+<tr><td>Profile</td><td><code>WriteRequestBodies</code>, explicit <code>customRules</code> for <code>system:authenticated:oauth</code>, <code>system:serviceaccounts:openshift-gitops</code>, <code>system:serviceaccounts:guardrails-system</code></td><td>bodies for writes reconstruct the change; reads stay attributed at Metadata; secret values never enter the log</td></tr>
+<tr><td>Sources</td><td><code>kubeAPI</code>, <code>openshiftAPI</code>, <code>auditd</code>, <code>ovn</code></td><td>projects/routes go through openshift-apiserver; tokens through oauth-apiserver; node-level auditd for control-plane logins; OVN for network-policy audit</td></tr>
+<tr><td>Transport</td><td>OpenShift Logging 6 (Vector) <code>ClusterLogForwarder</code>, tolerations for control-plane nodes, disk buffer</td><td>supported, at-least-once</td></tr>
+<tr><td>Destinations</td><td>SIEM (Splunk HEC; Elasticsearch/syslog blocks provided) = record; LokiStack tenant <code>audit</code> = alerting, 90 d</td><td>two destinations, one pipeline: neither outage blinds the other</td></tr>
+<tr><td>Immutability</td><td>S3 Object Lock on Loki and SIEM cold buckets; no <code>DeleteObject</code> permission</td><td>tamper evidence</td></tr>
+<tr><td>Labels</td><td><code>openshift.labels.cluster</code>, <code>environment</code></td><td>multi-cluster correlation</td></tr></table>
+<h3>7.2 Step by step</h3>
+<div class="steps">
+<div class="step">Apply <code>apiserver-audit.yaml</code>. The kube-apiserver operator rolls the three control-plane pods one at a time (10–15 min, no API downtime). Watch <code>oc get co kube-apiserver</code>.</div>
+<div class="step">Install the Logging and Loki operators (<code>operators.yaml</code>), create <code>logging-loki-s3</code> from the vault, apply <code>lokistack.yaml</code> (size <code>1x.small</code>, audit retention 90 d, <code>rules.enabled</code> with selectors).</div>
+<div class="step">Create the <code>splunk-hec</code> secret, apply <code>clusterlogforwarder-audit.yaml</code>. Check <code>oc get clf audit-forwarder -n openshift-logging -o jsonpath='{.status.conditions}'</code> for <code>Ready=True</code> and the collector DaemonSet on every node including masters.</div>
+<div class="step">Confirm flow in Prometheus: <code>sum(rate(loki_distributor_lines_received_total{tenant="audit"}[5m]))</code> &gt; 0, and in the SIEM.</div></div>
+<h3>7.3 Loki field naming</h3>
+<p>The <code>json</code> parser flattens nested keys with <code>_</code> and replaces every non-alphanumeric character with <code>_</code>:</p>
+<pre><code>user.username                                       → user_username
+objectRef.namespace                                 → objectRef_namespace
+annotations["guardrails-critical-delete/decision"]  → annotations_guardrails_critical_delete_decision
+annotations["validation.policy.admission.k8s.io/validation_failure"] → annotations_validation_policy_admission_k8s_io_validation_failure
+requestObject.metadata.annotations["guardrails.example.com/delete-approvals"] → requestObject_metadata_annotations_guardrails_example_com_delete_approvals</code></pre>
+<div class="corner"><span class="t">Corner case: the annotation key derives from the policy <em>name</em></span> Renaming a policy changes every Loki field name that keys on its audit annotations. Changing the label prefix does not. Keep policy names stable.</div>
+<div class="corner"><span class="t">Corner case: control-plane disk</span> <code>WriteRequestBodies</code> roughly doubles audit volume. kube-apiserver rotates at 10 × 100 MB per API server; with Vector shipping continuously this is comfortable, but watch <code>/var</code> on masters for a week after enabling.</div>
+<div class="corner"><span class="t">Corner case: `oc delete project` is two audit events</span> One in openshift-apiserver (the project delete) and one in kube-apiserver (the namespace delete, with the same user). The kube-apiserver event carries the guardrail annotations.</div>
+
+<h2 id="ch8">8 · Layer 6: detection</h2>
+<p>Files: <code>manifests/05-alerting/loki-alertingrules-audit.yaml</code>, <code>prometheusrule-gitops-health.yaml</code>, <code>manifests/07-hardening-extras/prometheusrule-vap-health.yaml</code>, <code>docs/06</code>.</p>
+<h3>8.1 Anatomy of an audit alert</h3>
+<pre><code>- alert: CriticalResourceDeleted
+  expr: |
+    sum by (user_username, impersonatedUser_username, objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster) (
+      count_over_time(
+        {log_type="audit"} | json
+        | verb="delete"
+        | responseStatus_code &gt;= 200 and responseStatus_code &lt; 300     # it succeeded
+        | annotations_guardrails_critical_delete_decision =~ ".+"       # the policy evaluated it => critical
+      [2m])
+    ) &gt; 0
+  for: 0s
+  labels: { severity: critical, guardrail: "true", team: platform-engineering }
+  annotations: { summary: ..., description: ..., runbook_url: ... }</code></pre>
+<ul><li><code>{log_type="audit"}</code> selects the stream; <code>| json</code> parses; label filters narrow; <code>count_over_time [2m]</code> turns log lines into a metric; <code>sum by (...)</code> chooses which fields become alert labels (and therefore appear in the Teams card).</li>
+<li><code>interval: 30s</code> on the group and <code>for: 0s</code> give a worst-case detection latency of ingestion (~5–10 s) + 30 s.</li>
+<li>Two rules cover a critical deletion: <code>CriticalResourceDeleted</code> keys on the policy's annotation (precise), <code>GitOpsResourceDeleted</code> keys on names and namespaces (works even if the policy were removed).</li></ul>
+<h3>8.2 The catalogue</h3>
+<table><tr><th>Alert</th><th>Pipeline</th><th>Severity</th><th>Trigger</th></tr>
+<tr><td>CriticalResourceDeleted</td><td>audit</td><td>critical</td><td>successful delete with the decision annotation</td></tr>
+<tr><td>GitOpsResourceDeleted</td><td>audit</td><td>critical</td><td>successful delete in GitOps namespaces / of GitOps kinds (name-based fallback)</td></tr>
+<tr><td>CriticalResourceDeleteDenied</td><td>audit</td><td>warning</td><td>delete with 4xx and a <code>validation_failure</code> naming the deletion policy</td></tr>
+<tr><td>CriticalDeletionApprovalRecorded</td><td>audit</td><td>info</td><td>successful patch/update with the decision annotation and an approvals value in the request body</td></tr>
+<tr><td>GuardrailPolicyModified</td><td>audit</td><td>critical</td><td>write to policies, bindings, GuardrailConfig, guardrails-* RBAC, reaper, by anyone but Argo CD</td></tr>
+<tr><td>AuditProfileChanged / AuditForwarderChanged</td><td>audit</td><td>critical</td><td>write to APIServer/cluster, CLF, LokiStack, AlertingRules by anyone but Argo CD / the logging operators</td></tr>
+<tr><td>PrivilegedRBACChange</td><td>audit</td><td>critical</td><td>the rbac-escalation policy's annotation present</td></tr>
+<tr><td>ImpersonationUsed</td><td>audit</td><td>critical</td><td>any write with <code>impersonatedUser</code></td></tr>
+<tr><td>BreakGlassUsed</td><td>audit</td><td>critical</td><td>any request by the break-glass SA</td></tr>
+<tr><td>KubeadminOrSystemAdminUsed</td><td>audit</td><td>critical</td><td>write by <code>kube:admin</code> / <code>system:admin</code></td></tr>
+<tr><td>ArgoCDDirectMutation</td><td>audit</td><td>warning</td><td>the gitops-only policy's annotation present</td></tr>
+<tr><td>ControlPlaneNodeAccess</td><td>audit</td><td>critical</td><td>exec/attach/debug in control-plane namespaces by a human</td></tr>
+<tr><td>ArgoCDApplicationControllerMissing / ArgoCDServerMissing / ArgoCDNoApplicationsReported / GitOpsOperatorMissing</td><td>metrics</td><td>critical</td><td>kube-state-metrics / Argo CD metrics absent or zero</td></tr>
+<tr><td>GitOpsNamespaceTerminating</td><td>metrics</td><td>critical</td><td><code>kube_namespace_status_phase{phase="Terminating"}</code></td></tr>
+<tr><td>GuardrailApplicationOutOfSyncOrMissing</td><td>metrics</td><td>warning</td><td>self-heal not working</td></tr>
+<tr><td>AuditLogIngestionStalled / AuditForwarderNotReady / LokiRulerDown</td><td>metrics</td><td>critical/warning</td><td>detection pipeline health</td></tr>
+<tr><td>GuardrailReaperFailing</td><td>metrics</td><td>warning</td><td>failed reaper jobs</td></tr>
+<tr><td>GuardrailPolicyEvaluationErrors / GuardrailPolicyNotEvaluating / GuardrailPolicySlow <span class="tag">G4</span></td><td>metrics</td><td>critical/warning</td><td>kube-apiserver VAP metrics</td></tr></table>
+<div class="corner"><span class="t">Corner case: `sum(...) == 0` never fires when there is no data</span> An empty result is not zero. Pipeline-health rules therefore use <code>absent(...)</code> or the Loki distributor metric that exists whether or not lines arrive.</div>
+<div class="corner"><span class="t">Corner case: noisy legitimate identities</span> Group-sync and IdP service accounts change groups; logging operators update their own objects. Each rule excludes the known identities (<code>user_username !~ ...</code>); add yours after phase-1 observation, never by loosening the policy.</div>
+
+<h2 id="ch9">9 · Layer 7: notification</h2>
+<p>File: <code>manifests/05-alerting/alertmanager-main.yaml</code> (the platform Alertmanager secret; alternative <code>AlertmanagerConfig</code> path documented).</p>
+<h3>9.1 Routing tree</h3>
+<div class="diagram">route (default receiver, group_wait 30s)
+ ├─ guardrail="true" & severity="critical" → guardrail-red (email + Teams)   group_wait 0s  group_interval 1m  repeat 30m  continue
+ ├─ guardrail="true" & severity="warning"  → guardrail-teams-only            group_wait 15s repeat 4h                       continue
+ ├─ guardrail="true" & severity="info"     → guardrail-teams-only            group_wait 1m  group_interval 10m
+ └─ guardrail="true"                       → default (your existing on-call receiver: nothing is lost if Teams/SMTP fail)
+inhibit: CriticalResourceDeleted silences CriticalResourceDeleteDenied for the same object; critical silences warning per alertname/namespace</div>
+<ul><li><code>group_wait: 0s</code> sends the first notification immediately; <code>group_by</code> includes the object name so two deletions are two cards; <code>repeat_interval: 30m</code> keeps paging until resolved (<code>resolve_timeout</code> 5 min after the rule stops firing).</li>
+<li><code>continue: true</code> lets the same alert flow to the next matching route (the default receiver).</li>
+<li>Templates live in the <code>guardrail.tmpl</code> key of the secret, mounted by the Prometheus Operator under <code>/etc/alertmanager/config/</code>; the email is HTML with a priority header, the Teams text is Markdown for an adaptive card.</li></ul>
+<h3>9.2 Microsoft Teams (Workflows)</h3>
+<div class="steps">
+<div class="step">In the target channel: <b>… → Workflows → "Post to a channel when a webhook request is received"</b>; copy the HTTP POST URL. The <code>sig=</code> query parameter is the credential.</div>
+<div class="step">Store it in the vault; render it into both <code>webhook_url</code> fields of <code>msteamsv2_configs</code>. Alertmanager ≥ 0.28 sends the adaptive-card payload the Workflow expects; OCP 4.21 ships 0.29.0.</div>
+<div class="step">Test with <code>amtool alert add ...</code> (docs/06); expect the card in ~10 s.</div></div>
+<h3>9.3 Email</h3>
+<p><code>global.smtp_*</code> with TLS and authentication, password from the vault, distribution lists rather than individuals. Consider a second <code>email_configs</code> entry to the ticketing system's mail-to-ticket address so every red alert opens an incident automatically.</p>
+<div class="corner"><span class="t">Corner case: replacing `alertmanager-main` replaces everything</span> Merge the guardrail receivers and routes into your existing configuration; do not overwrite an existing on-call receiver. Validate with <code>amtool check-config</code> before replacing.</div>
+<div class="corner"><span class="t">Corner case: `AlertmanagerConfig` cannot see platform alerts</span> The user-workload <code>AlertmanagerConfig</code> is namespaced and matches only alerts carrying its namespace label. Loki ruler alerts carry no namespace label by default. The platform secret path is the one that works without extra labelling.</div>
+
+<h2 id="ch10">10 · Layer 8: backup and recovery</h2>
+<p>Files: <code>manifests/06-backup/*</code>, <code>manifests/07-hardening-extras/etcd-backup-cronjob.yaml</code>, <code>docs/07</code>.</p>
+<table><tr><th>Source</th><th>What it restores</th><th>RPO</th><th>Mechanism</th></tr>
+<tr><td>Git</td><td>Applications, AppProjects, the ArgoCD CR patch, every guardrail object</td><td>last commit</td><td><code>oc apply --server-side -k manifests/overlays/&lt;phase&gt;</code>, then bootstrap app-of-apps</td></tr>
+<tr><td>OADP (Velero)</td><td>GitOps namespaces with cluster-scoped dependants (repo/cluster secrets, OLM state), daily cluster-scoped guardrail objects</td><td>6 h / 24 h</td><td><code>Schedule</code>s to an object-locked bucket separate from Loki's; <code>includeClusterResources: true</code></td></tr>
+<tr><td>etcd snapshot <span class="tag">G6</span></td><td>the entire control plane</td><td>24 h</td><td>nightly CronJob running Red Hat's <code>cluster-backup.sh</code> on a master; disaster-only restore</td></tr></table>
+<h3>10.1 Velero semantics worth knowing</h3>
+<ul><li><code>includedNamespaces</code> + <code>includeClusterResources: true</code> backs up cluster-scoped objects <em>related</em> to those namespaces (ClusterRoleBindings with subjects in them, CRDs of backed-up CRs).</li>
+<li>A restore <em>creates</em> objects that are missing and, with <code>existingResourcePolicy: update</code>, patches existing ones. In phase 4 the Velero SA must be in <code>gitopsServiceAccounts</code> to update critical objects (Chapter 13, G3 note).</li>
+<li>Argo CD's Redis is a cache; <code>snapshotVolumes: false</code> is correct for the GitOps namespaces.</li></ul>
+<h3>10.2 Cold-start runbook (summary)</h3>
+<div class="steps">
+<div class="step">Declare the incident; attribute with <code>scripts/audit-query.sh</code>.</div>
+<div class="step">If the operator is present: apply the overlay; Argo CD re-syncs the app-of-apps. ~10 min.</div>
+<div class="step">If the namespace/operator is gone: reinstall the Subscription; wait for the default instance; then apply the overlay. ~30 min.</div>
+<div class="step">Credentials: Velero restore of <code>argocd.argoproj.io/secret-type</code> secrets, or ESO re-sync.</div>
+<div class="step"><code>scripts/verify-install.sh</code>; smoke test; post-mortem.</div></div>
+<div class="corner"><span class="t">Corner case: restoring a critical object that still exists but is being deleted</span> If the object is in Terminating because a finalizer is stuck, a restore cannot replace it. Resolve the finalizer through the workflow first (an UPDATE of a critical object) or use break-glass.</div>
+
+<h2 id="ch11">11 · Git process</h2>
+<p>Files: <code>.github/*</code>, <code>docs/08</code>. The cluster-side guardrail assumes the manifests in <code>main</code> are trustworthy; the repository therefore needs the same two-person property.</p>
+<table><tr><th>Control</th><th>Setting</th></tr>
+<tr><td>Ruleset on <code>main</code>, no bypass actors</td><td>2 approvals, code-owner review, dismiss stale approvals, approval of last push, linear history, signed commits, no force-push/delete, required check <code>validate</code></td></tr>
+<tr><td>CODEOWNERS</td><td>guardrail, RBAC, audit, alerting and overlay paths need both platform-engineering and security</td></tr>
+<tr><td>CI <code>policy-ci</code></td><td>yamllint, kustomize build of base + 4 overlays, kubeconform, Mermaid parse of every diagram, shellcheck, guardrail invariants (enforce binding says Deny; no cascade finalizer / prune on the guardrails app; no human in exemptUsers; minApprovers ≥ 2; no plaintext secrets), optional server-side dry-run on pre-prod</td></tr>
+<tr><td>Secret scanning + push protection</td><td>blocks committing the Teams URL (<code>sig=</code>) or SMTP passwords</td></tr></table>
+<div class="corner"><span class="t">Corner case: the ruleset's "no bypass" and emergencies</span> An org admin can still edit the ruleset. That edit is in the GitHub audit log; the break-glass runbook requires a second person watching and reverting the bypass before the incident closes.</div>
+
+<h2 id="ch12">12 · Rollout and operations</h2>
+<h3>12.1 Phases</h3>
+<table><tr><th>Phase</th><th>Overlay</th><th>Deletion + label-control bindings</th><th>GitOps-only binding</th><th>Exit criterion</th></tr>
+<tr><td>1 audit</td><td><code>phase1-audit</code></td><td><code>[Audit]</code></td><td><code>[Audit]</code></td><td>VAP Ready; R3 answered; 7 days with zero unexplained would-have-been-denied events; approvers rehearsed</td></tr>
+<tr><td>2 warn</td><td><code>phase2-warn</code></td><td><code>[Warn, Audit]</code></td><td><code>[Warn, Audit]</code></td><td>7 days with zero warnings from pipelines/operators; synthetic red alert acknowledged</td></tr>
+<tr><td>3 enforce</td><td><code>phase3-enforce</code></td><td><code>[Deny, Audit]</code></td><td><code>[Audit]</code></td><td>32-case matrix PASS on pre-prod; break-glass rehearsed ≤ 30 d; restore drill ≤ 90 d</td></tr>
+<tr><td>4 gitops-only</td><td><code>phase4-gitops-only</code></td><td><code>[Deny, Audit]</code></td><td><code>[Deny, Audit]</code></td><td>14 days with zero <code>ArgoCDDirectMutation</code></td></tr></table>
+<p>A phase change is a PR that edits <code>spec.source.path</code> of the guardrails Application. Rollback is the reverse PR; emergency rollback is break-glass editing <code>validationActions</code> (alerted, incident, post-mortem).</p>
+<h3>12.2 Recurring activities</h3>
+<table><tr><th>Cadence</th><th>Activity</th></tr>
+<tr><td>Continuous</td><td>acknowledge guardrail alerts ≤ 5 min; every <code>CriticalResourceDeleted</code> maps to a change ticket</td></tr>
+<tr><td>Weekly</td><td>review denied / direct-mutation / impersonation counts; tune identities via PR</td></tr>
+<tr><td>Monthly</td><td>synthetic alert; <code>scripts/verify-install.sh</code></td></tr>
+<tr><td>Quarterly</td><td>access recertification (groups, GitHub teams, vault custodians); restore drill; break-glass rehearsal</td></tr>
+<tr><td>Per upgrade</td><td><code>scripts/test-guardrails.sh</code> on pre-prod (CEL library and Loki field-name changes surface here)</td></tr></table>
+<h3>12.3 KPIs</h3>
+<p>Unapproved critical deletions 0 · detection latency p95 ≤ 60 s · acknowledgement ≤ 5 min · approvers available ≥ 2× required · break-glass uses 0 per quarter (each with a post-mortem) · restore drill success 100 %.</p>
+
+<h2 id="ch13">13 · Gap analysis and implementations</h2>
+<p>A corner-case review of the original solution found the following gaps. Each was implemented in the repository as described; the study of each gap teaches a general lesson.</p>
+
+<div class="gap"><span class="t">G1 · Anyone with patch rights could mark an object critical</span>
+<p><b>Problem.</b> The deletion policy protected labelled objects but nothing controlled who may <em>add</em> the label. A tenant with <code>patch</code> on a ConfigMap in their namespace could label it critical and (a) force the platform team through the workflow for a tenant object, (b) wedge their namespace in Terminating on cleanup, (c) create noise. "Critical" is a platform decision.</p>
+<p><b>Implementation.</b> <code>manifests/03-guardrails/vap-critical-label-control.yaml</code>: a policy on CREATE and UPDATE of the protected kinds, bound with the same label <code>objectSelector</code> (so it costs nothing on unlabelled traffic), with one validation:</p>
+<pre><code>!(newLabelCritical && !oldLabelCritical) || isTrusted
+# isTrusted = exemptUsers ∪ gitopsServiceAccounts ∪ members of approverGroups
+# oldLabelCritical is guarded by request.operation == 'UPDATE' because oldObject is null on CREATE</code></pre>
+<p>Follows the phase actions (Audit → Warn → Deny). Argo CD applying the label from Git is allowed; approvers may label by hand; everyone else gets <code>GUARDRAIL DENIED: only Argo CD, break-glass or members of gitops-deletion-approvers may mark an object as critical</code>. Removal stays governed by V2. Test T3.10 / script cases 2b.</p>
+<p><b>Lesson.</b> A marker that changes enforcement is itself a privileged field; control its creation, not just its removal.</p></div>
+
+<div class="gap"><span class="t">G2 · An approver could write a far-future timestamp and never expire</span>
+<p><b>Problem.</b> The reaper removed entries older than the TTL. CEL cannot check time, so an approver could write <code>a1@example.com|2099-01-01T00:00:00Z</code> and keep their approval valid for years (bounded only by the object's lifetime and the request staying unchanged).</p>
+<p><b>Implementation.</b> The reaper (<code>reaper-cronjob.yaml</code>, <code>reap.sh</code>) now also removes entries whose timestamp is more than 5 minutes in the future or unparseable:</p>
+<pre><code>if (( NOW - TS_SEC &gt; TTL_SEC || TS_SEC &gt; NOW + 300 )); then expire; fi</code></pre>
+<p>A past timestamp only shortens the approver's own validity, which is harmless. Test T6.2 covers it.</p>
+<p><b>Lesson.</b> When a timestamp is supplied by the party it constrains, validate it against a clock they do not control.</p></div>
+
+<div class="gap"><span class="t">G3 · Trusted GitOps identities were incomplete</span>
+<p><b>Problem.</b> Only the application-controller was in <code>gitopsServiceAccounts</code>. Argo CD's server writes <code>.operation</code> and the <code>argocd.argoproj.io/refresh</code> annotation on Applications (UI/CLI sync and refresh), the ApplicationSet controller creates/updates generated Applications, and the GitOps operator reconciles the ArgoCD CR. In phase 4 those writes to critical Applications would have been denied (UI sync broken); in phases 1–3 they would have produced constant <code>ArgoCDDirectMutation</code> noise.</p>
+<p><b>Implementation.</b> <code>guardrailconfig-default.yaml</code> and the CRD default now list <code>openshift-gitops-argocd-server</code>, <code>openshift-gitops-applicationset-controller</code> and <code>openshift-gitops-operator-controller-manager</code> alongside the application-controller, with a comment on how to add others (External Secrets for critical Secrets, Velero for restores) after observing phase-1 alerts. None of them is exempt from the deletion rule.</p>
+<p><b>Lesson.</b> "Which identities legitimately write this object" is an empirical question; phase 1 exists to answer it. Trusted mutators are not exempt identities.</p></div>
+
+<div class="gap"><span class="t">G4 · No alert if the policy itself errors or runs out of budget</span>
+<p><b>Problem.</b> Under <code>failurePolicy: Fail</code>, a CEL runtime error or a cost-budget overrun denies requests for the wrong reason, silently.</p>
+<p><b>Implementation.</b> <code>manifests/07-hardening-extras/prometheusrule-vap-health.yaml</code> in <code>openshift-kube-apiserver</code>:</p>
+<pre><code>GuardrailPolicyEvaluationErrors: rate(apiserver_validating_admission_policy_check_total{policy=~"guardrails-.*", error_type!="none"}[5m]) &gt; 0
+GuardrailPolicyNotEvaluating:    zero evaluations of guardrails-critical-delete in 30 min, or metric absent
+GuardrailPolicySlow:             p99 apiserver_validating_admission_policy_check_duration_seconds &gt; 50 ms</code></pre>
+<p><b>Lesson.</b> A fail-closed control needs a health signal so "closed" is noticed.</p></div>
+
+<div class="gap"><span class="t">G5 · OAuth token lifetimes were described, not implemented</span>
+<p><code>manifests/07-hardening-extras/oauth-token-config.yaml</code>: <code>accessTokenMaxAgeSeconds: 28800</code>, <code>accessTokenInactivityTimeout: 2h</code>, applied server-side so the IdP configuration in the cluster-config repository is untouched. The OAuth object is critical (config.openshift.io).</p></div>
+
+<div class="gap"><span class="t">G6 · etcd snapshots were described, not implemented</span>
+<p><code>manifests/07-hardening-extras/etcd-backup-cronjob.yaml</code>: namespace <code>openshift-etcd-backup</code>, SA bound to the privileged SCC, nightly CronJob on a master running <code>chroot /host /usr/local/bin/cluster-backup.sh</code>, keeps 7 snapshots under <code>/var/backup/etcd</code>. Ship them off-node with your backup agent; snapshots contain every Secret and must be encrypted at rest (see G8).</p></div>
+
+<div class="gap"><span class="t">G7 · Group sync from the directory was described, not implemented</span>
+<p><code>manifests/07-hardening-extras/ldap-group-sync.example.yaml</code>: <code>LDAPSyncConfig</code> mapping five directory groups to the five contract groups, whitelist, SA with group create/update only, hourly CronJob. <code>userNameAttributes</code> must yield the same username the login produces. Add the SA to the <code>PrivilegedRBACChange</code> exclusion once stable. Not in the kustomization (needs the LDAP secret and CA).</p></div>
+
+<div class="gap"><span class="t">G8 · Node-level bypass had no technical mitigation</span>
+<p>Residual risk R2 (node/etcd access) now has two example manifests:</p>
+<ul><li><code>machineconfig-control-plane-ssh.example.yaml</code>: empties <code>core</code>'s authorized keys and masks <code>sshd</code> on masters. The only remaining node access is <code>oc debug node</code>, an audited API request that <code>ControlPlaneNodeAccess</code> alerts on. Rolls the masters; do not apply on single-node clusters without console access.</li>
+<li><code>apiserver-etcd-encryption.example.yaml</code>: <code>APIServer.spec.encryption.type: aesgcm</code>, so an etcd snapshot or disk image does not expose Secrets. One-time re-encryption of 10–30 minutes.</li></ul>
+<p>Both are deliberate decisions, hence examples rather than defaults.</p></div>
+
+<div class="gap"><span class="t">G9 · A second notification path at Argo CD level (optional)</span>
+<p>Argo CD Notifications can post to Teams when an Application is deleted or a sync fails, independently of the audit pipeline. Add to the ArgoCD CR:</p>
+<pre><code>spec:
+  notifications:
+    enabled: true
+# then in the argocd-notifications-cm (managed by the operator through the CR's extraConfig or a ConfigMap patch):
+#   service.teams: { recipientUrls: { platform: $teams-webhook-url } }
+#   trigger.on-deleted: [{ when: "app.metadata.deletionTimestamp != nil", send: [app-deleted] }]
+#   template.app-deleted: { teams: { title: "Argo CD Application {{.app.metadata.name}} deleted", text: "by ... see audit trail" } }
+# and a subscription annotation on critical Applications:
+#   notifications.argoproj.io/subscribe.on-deleted.teams: platform</code></pre>
+<p>Because the deletion is denied by the policy in normal operation, this fires only for approved deletions or bypasses, which is exactly when a second, independent message is valuable.</p></div>
+
+<div class="gap"><span class="t">G10 · SIEM-side equivalents of the Loki alerts</span>
+<p>If Loki is down, the SIEM should raise the same alarms. Splunk saved searches (schedule every minute, alert on results &gt; 0):</p>
+<pre><code>index=openshift_audit verb=delete responseStatus.code&gt;=200 responseStatus.code&lt;300 "annotations.guardrails-critical-delete/decision"=*
+| table _time user.username impersonatedUser.username objectRef.resource objectRef.namespace objectRef.name "annotations.guardrails-critical-delete/decision"
+
+index=openshift_audit verb=delete responseStatus.code&gt;=400 "annotations.validation.policy.admission.k8s.io/validation_failure"="*guardrails-critical-delete*"
+
+index=openshift_audit impersonatedUser.username=* verb IN (create,update,patch,delete)
+
+index=openshift_audit user.username="system:serviceaccount:guardrails-system:breakglass"
+
+index=openshift_audit objectRef.resource IN (validatingadmissionpolicies, validatingadmissionpolicybindings, guardrailconfigs) verb IN (create,update,patch,delete) user.username!="system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller"</code></pre></div>
+
+<div class="gap"><span class="t">G11 · Multi-cluster distribution (ACM)</span>
+<p>With Red Hat Advanced Cluster Management, deliver <code>manifests/base</code> as a <code>Policy</code> so every managed cluster gets the same guardrail and drift is reported centrally:</p>
+<pre><code>apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata: { name: guardrails, namespace: policies }
+spec:
+  remediationAction: enforce
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata: { name: guardrails-objects }
+        spec:
+          remediationAction: enforce
+          severity: high
+          object-templates-raw: |
+            {{ range (lookup "v1" "ConfigMap" "policies" "guardrails-rendered").data }} ... {{ end }}
+# simpler: use the PolicyGenerator kustomize plugin with `manifests/overlays/phase3-enforce` as the source directory
+# and a Placement selecting production clusters. The approval workflow remains per cluster (annotations live on
+# each cluster's objects); Alertmanager routing per cluster uses the `cluster` label from the forwarder.</code></pre></div>
+
+<div class="gap"><span class="t">G12 · Disconnected environments</span>
+<p>Mirror <code>registry.redhat.io/openshift4/ose-cli-rhel9:v4.21</code> (reaper, etcd backup, group sync) through your <code>ImageDigestMirrorSet</code>; the Logging, Loki, GitOps and OADP operators through the mirrored catalog. Teams and SMTP need an egress path from the Alertmanager pods (proxy in <code>cluster-wide Proxy</code>; Alertmanager honours <code>http_config.proxy_url</code> per receiver).</p></div>
+
+<div class="gap"><span class="t">G13 · Velero restores in phase 4</span>
+<p>A restore that updates an existing critical object runs as <code>system:serviceaccount:openshift-adp:velero</code>. In phase 4 add it to <code>gitopsServiceAccounts</code> (never to <code>exemptUsers</code>): it may then update but still not delete.</p></div>
+
+<h2 id="ch14">14 · Corner-case catalogue</h2>
+<p>Everything that surprises people, in one table. "Behaviour" is what the cluster does with this repository applied in phase 3.</p>
+<table><tr><th>#</th><th>Scenario</th><th>Behaviour</th><th>Why</th><th>What to do</th></tr>
+<tr><td>1</td><td>cluster-admin deletes a critical object</td><td>403 GUARDRAIL DENIED; warning alert</td><td>admission applies to system:masters</td><td>use the workflow</td></tr>
+<tr><td>2</td><td>Remove the critical label, then delete</td><td>label removal denied (V2)</td><td>removal needs the same approvals</td><td>workflow</td></tr>
+<tr><td>3</td><td>Delete by label selector / deletecollection</td><td>each object evaluated; critical ones denied, others deleted</td><td>API server expands to per-object deletes</td><td>expected</td></tr>
+<tr><td>4</td><td>Delete the namespace containing a critical object</td><td>namespace accepted, stays Terminating; <code>GitOpsNamespaceTerminating</code> if it is a GitOps namespace; the controller's deletes are denied and alerted</td><td>namespace controller is not exempt</td><td>approve the object's deletion or unlabel via workflow; G1 stops tenants from causing this</td></tr>
+<tr><td>5</td><td>Delete a CRD with critical instances</td><td>CRD deletion itself denied for the protected groups; other CRDs: instances deleted by the API server (cascade), critical instances denied → CRD stuck with cleanup finalizer</td><td>CRD cleanup issues per-object deletes</td><td>protect CRD groups by name (done for the six groups); approve or unlabel instances first</td></tr>
+<tr><td>6</td><td>Owner deleted, GC deletes critical child</td><td>GC denied repeatedly; alert storm</td><td>GC is not exempt</td><td>never set ownerReferences on critical objects</td></tr>
+<tr><td>7</td><td>Argo CD prunes a critical object</td><td>sync fails with GUARDRAIL message; alert with the SA as actor</td><td>controller SA not exempt</td><td>revert the PR</td></tr>
+<tr><td>8</td><td>Delete the guardrails Application</td><td>allowed only via workflow (it is labelled critical); if deleted, nothing on the cluster changes (no finalizer)</td><td>no cascade finalizer</td><td>recreate from Git</td></tr>
+<tr><td>9</td><td>Delete an Application that still has the cascade finalizer</td><td>if labelled critical: denied. If not labelled: Application deleted and its resources cascade-deleted</td><td>the label is the protection; the finalizer is the danger</td><td>remove finalizers, set preserveResourcesOnDeletion, label production apps</td></tr>
+<tr><td>10</td><td>Approver writes two entries in one patch</td><td>denied (V3)</td><td>one entry per request, naming the caller</td><td>each approver runs the script</td></tr>
+<tr><td>11</td><td>Approver edits data in the same patch</td><td>denied (V3 onlyGuardrailAnnotationsChanged)</td><td>no smuggling</td><td>separate change through Git</td></tr>
+<tr><td>12</td><td>Requester changes the reason after approvals</td><td>denied unless approvals are cleared in the same patch (V4)</td><td>approvals bind to the justification</td><td>re-request, re-approve</td></tr>
+<tr><td>13</td><td>Executor is one of the approvers</td><td>denied (V1, executorMayBeApprover=false)</td><td>three-person rule</td><td>a third person executes</td></tr>
+<tr><td>14</td><td>Approver far-future timestamp</td><td>accepted by admission, removed by the reaper within 10 min (G2)</td><td>no clock in CEL</td><td>none</td></tr>
+<tr><td>15</td><td>Approvals older than 4 h</td><td>removed by the reaper; delete denied "found 0/1"</td><td>TTL</td><td>re-approve</td></tr>
+<tr><td>16</td><td>Reaper SA token stolen</td><td>can remove approvals only; cannot add, cannot delete</td><td>V3 reaper clause + no delete verb</td><td>rotate token; alert on reaper identity writing outside its CronJob window if desired</td></tr>
+<tr><td>17</td><td>cluster-admin impersonates an approver</td><td>approval accepted; <code>ImpersonationUsed</code> P1; audit shows both identities</td><td>admission cannot see impersonation</td><td>JIT cluster-admin; treat as incident</td></tr>
+<tr><td>18</td><td>Break-glass token used</td><td>everything allowed; <code>BreakGlassUsed</code> per request; <code>exempt=true</code> in decision</td><td>designed escape hatch</td><td>must map to an incident with two custodians</td></tr>
+<tr><td>19</td><td>GuardrailConfig deleted or missing</td><td>deletion is denied (critical); if somehow missing, UPDATE/DELETE of critical objects denied (fail closed), workloads unaffected</td><td>parameterNotFoundAction Deny + scoped bindings</td><td>restore from Git</td></tr>
+<tr><td>20</td><td>Binding validationActions set to []</td><td>flagged/denied per phase; reverted by self-heal; <code>GuardrailPolicyModified</code></td><td>self-protection</td><td>incident</td></tr>
+<tr><td>21</td><td>Policy deleted</td><td>denied by V1 if VAP evaluates its own kind (R3); otherwise RBAC + self-heal + alert</td><td>see Ch. 6</td><td>confirm in phase 1</td></tr>
+<tr><td>22</td><td>CEL runtime error / cost budget</td><td>request denied (failurePolicy Fail); <code>GuardrailPolicyEvaluationErrors</code> (G4)</td><td>fail closed</td><td>fix the expression via PR</td></tr>
+<tr><td>23</td><td>Mutating webhook injects annotations</td><td>approval writes denied ("nothing else changed" false)</td><td>mutating runs before validating</td><td>exclude guardrail kinds from the webhook</td></tr>
+<tr><td>24</td><td>Status updates by controllers</td><td>never evaluated</td><td>subresources not matched</td><td>none</td></tr>
+<tr><td>25</td><td>OLM upgrades the GitOps operator</td><td>allowed</td><td>OLM kinds not in gitops-only constraints; annotations unchanged</td><td>none</td></tr>
+<tr><td>26</td><td>UI sync/refresh of a critical Application</td><td>allowed (server SA trusted, G3)</td><td>.operation and refresh annotation are writes</td><td>none</td></tr>
+<tr><td>27</td><td>Tenant labels their ConfigMap critical</td><td>denied (G1) unless approver/Argo CD</td><td>label-control policy</td><td>label in Git through the platform repo</td></tr>
+<tr><td>28</td><td>Audit forwarder stopped</td><td><code>AuditLogIngestionStalled</code> from metrics within ~10 min; Argo CD availability alerts still work</td><td>independent pipelines</td><td>restore the forwarder; both outputs share the same collector, so check SIEM ingestion as well</td></tr>
+<tr><td>29</td><td>Loki ruler down</td><td><code>LokiRulerDown</code>; SIEM saved searches (G10) cover</td><td>two detection paths</td><td>fix ruler</td></tr>
+<tr><td>30</td><td>Teams webhook rotated / SMTP down</td><td>guardrail alerts also reach the default on-call receiver</td><td>route continue</td><td>update secret</td></tr>
+<tr><td>31</td><td>Policy renamed</td><td>Loki field names for its annotations change; rules stop matching</td><td>key derives from policy name</td><td>never rename; if you must, update rules in the same PR</td></tr>
+<tr><td>32</td><td>Logging operator major upgrade</td><td>json field names may change</td><td>data model</td><td>run the test matrix after every upgrade (R6)</td></tr>
+<tr><td>33</td><td>Second Argo CD instance</td><td>its SAs untrusted, its CR unprotected until labelled</td><td>name rule covers openshift-gitops only</td><td>extend gitopsServiceAccounts; label in Git</td></tr>
+<tr><td>34</td><td>Namespace-scoped Role/RoleBinding named guardrails-*</td><td>not protected unless labelled: the named binding lists only ClusterRoles/ClusterRoleBindings</td><td>binding B scope excludes namespaced RBAC</td><td>label namespaced guardrail RBAC in Git</td></tr>
+<tr><td>35</td><td>Object with critical label created by an untrusted user via CREATE</td><td>denied (G1 covers CREATE)</td><td>label-control policy</td><td>none</td></tr>
+<tr><td>36</td><td>Username with '|' or ','</td><td>approval regex rejects</td><td>separator collision</td><td>change separators consistently (policy, lib.sh, reaper)</td></tr>
+<tr><td>37</td><td>Velero restore of critical objects in phase 4</td><td>updates denied unless Velero SA trusted (G13)</td><td>gitops-only policy</td><td>add SA to gitopsServiceAccounts</td></tr>
+<tr><td>38</td><td>Hosted control plane</td><td>policy identical; audit shipping differs</td><td>platform-managed API server</td><td>point rules at wherever audit lands</td></tr>
+<tr><td>39</td><td>`oc debug node` on a master</td><td>allowed; <code>ControlPlaneNodeAccess</code> P1</td><td>node access bypasses admission</td><td>G8 SSH lockdown; incident</td></tr>
+<tr><td>40</td><td>Phase 1 test script reports FAIL on deny cases</td><td>expected: nothing is blocked in phase 1</td><td>Audit action only</td><td>check validation_failure annotations instead</td></tr></table>
+
+<h2 id="ch15">15 · Self-assessment</h2>
+<p>Answer without notes; the answers are in <code>details</code>.</p>
+<details><summary>1. Why can RBAC not implement "no single person may delete X", even with a carefully written role?</summary>RBAC is additive and evaluated per identity; whoever holds <code>delete</code> can delete alone, and <code>cluster-admin</code>/<code>system:masters</code> hold everything and skip RBAC. Only admission can look at the object's state (approvals) and the request together and say no to any identity.</details>
+<details><summary>2. On a DELETE request, which CEL variable holds the object and why does the policy read <code>oldObject</code> for UPDATE decisions too?</summary><code>object</code> is null on DELETE; <code>oldObject</code> holds the object. For UPDATE the security decision must be based on the pre-request state so a change made in the same request cannot be used to satisfy the rule.</details>
+<details><summary>3. Why does removing the critical label require approvals?</summary>Otherwise "unlabel, then delete" is a one-person path. Rule V2 makes removal exactly as hard as deletion.</details>
+<details><summary>4. Why is the Argo CD application-controller not in <code>exemptUsers</code>?</summary>Exempting it would turn "merge a PR that removes a manifest" into a single-person deletion, with Git review as the only protection. As a trusted <em>mutator</em> it can change objects; as a non-exempt identity its prunes of critical objects are denied and alerted.</details>
+<details><summary>5. How does the design enforce approval expiry without a clock in CEL, and what did G2 fix?</summary>A reaper CronJob removes entries older than the TTL; the policy lets that identity only remove. G2 made the reaper also remove future-dated or unparseable timestamps so an approver cannot extend their own approval.</details>
+<details><summary>6. Which two audit annotations do the alerts key on, and which is present on allowed requests?</summary><code>guardrails-critical-delete/decision</code> (present on every evaluated request on a critical object, allowed or denied) and <code>validation.policy.admission.k8s.io/validation_failure</code> (present when a validation failed and the binding has Audit).</details>
+<details><summary>7. What happens when the audit forwarder is stopped, and which alert tells you?</summary>Audit-based alerts go blind; the metrics pipeline raises <code>AuditLogIngestionStalled</code> from the Loki distributor metric (and <code>AuditForwarderChanged</code> on the change itself). Argo CD availability alerts continue from metrics.</details>
+<details><summary>8. Why two bindings for the deletion policy?</summary>The labelled binding uses an objectSelector so ordinary Secret/ConfigMap traffic is never evaluated; the named binding covers low-traffic kinds that carry no label (namespaces, CRDs, policies, groups). The split also limits the blast radius of fail-closed behaviour.</details>
+<details><summary>9. A namespace is stuck in Terminating after the guardrail was enabled. Cause and resolution?</summary>It contains a critical object; the namespace controller's deletes are denied. Approve the deletion or remove the label through the workflow. G1 prevents tenants from creating this on purpose.</details>
+<details><summary>10. Name the residual risks and their compensating controls.</summary>R1 impersonation by cluster-admin (JIT admin, P1 alert, audit shows both identities); R2 node/etcd access (SSH lockdown, etcd encryption, exec alert); R3 whether VAP guards its own bindings (RBAC, self-heal, alert); collusion (audit, recertification); alert delivery (default receiver fallback); Logging upgrades renaming fields (test after upgrade).</details>
+<details><summary>11. Why <code>group_wait: 0s</code> for guardrail alerts but not for everything?</summary>A deletion is a single, immediately actionable event; grouping delay adds nothing. Capacity alerts benefit from grouping to avoid storms.</details>
+<details><summary>12. What does <code>parameterNotFoundAction: Deny</code> do and why is it safe here?</summary>Requests matched by the binding are denied when <code>GuardrailConfig/default</code> is missing (fail closed). It is safe because the bindings are scoped to labelled objects and a short list of low-traffic kinds, so workloads are unaffected.</details>
+<details><summary>13. Which writes does Argo CD's server make to an Application, and why did that matter?</summary><code>.operation</code> on sync and the <code>argocd.argoproj.io/refresh</code> annotation on refresh. Without the server SA in <code>gitopsServiceAccounts</code>, phase 4 would deny UI syncs of critical Applications (G3).</details>
+<details><summary>14. How would you add a new kind (say <code>Certificate</code> from cert-manager) to the protected set?</summary>Add its group/resource to <code>matchConstraints</code> of the deletion, label-control and gitops-only policies; to the labelled binding nothing (it inherits); to the reaper's resource list; to the approver/executor ClusterRoles; label the objects in Git; add cert-manager's SA to <code>gitopsServiceAccounts</code> if it writes them; extend the test matrix and the docs' rule table; PR with security review.</details>
+<details><summary>15. What is the exact three-step sequence to promote from phase 2 to 3 and the one-line rollback?</summary>Verify phase-2 exit criteria; PR changing <code>spec.source.path</code> of the guardrails Application to <code>manifests/overlays/phase3-enforce</code>; after merge, smoke-test with a server dry-run delete of the ArgoCD CR (must be denied). Rollback: the reverse PR (emergency: break-glass edits validationActions, alerted).</details>
+
+<h2 id="ch16">16 · Glossary and references</h2>
+<table><tr><th>Term</th><th>Meaning here</th></tr>
+<tr><td>Admission</td><td>API-server phase after authorization where plugins accept, mutate or reject a write</td></tr>
+<tr><td>VAP / VAPB</td><td>ValidatingAdmissionPolicy / ...Binding (admissionregistration.k8s.io/v1)</td></tr>
+<tr><td>CEL</td><td>Common Expression Language, the expression language used by VAP</td></tr>
+<tr><td>Two-person rule</td><td>an action requires two independent authorised people; here effectively three (requester, two approvers, executor ∉ approvers)</td></tr>
+<tr><td>Critical</td><td>an object labelled <code>guardrails.example.com/critical=true</code> or matched by the name rules</td></tr>
+<tr><td>Exempt identity</td><td>skips the deletion rule entirely: API-server loopback and the break-glass SA only</td></tr>
+<tr><td>Trusted mutator</td><td>may change critical objects (Argo CD identities); not exempt from deletion</td></tr>
+<tr><td>Reaper</td><td>CronJob that expires approvals; may only remove entries</td></tr>
+<tr><td>Phase</td><td>rollout stage selected by the guardrails Application's source path; changes only validationActions</td></tr>
+<tr><td>SIEM</td><td>the long-term audit record (Splunk/Elastic); Loki is the 90-day alerting store</td></tr>
+<tr><td>Break-glass</td><td>dual-control emergency identity, alerted on every use</td></tr>
+<tr><td>Residual risk</td><td>what the design does not close, with compensating controls (docs/01)</td></tr></table>
+<h3>References</h3>
+<ul>
+<li>Kubernetes: Validating Admission Policy; Common Expression Language in Kubernetes; Auditing; Garbage Collection; Namespaces (termination); Using RBAC Authorization; User impersonation.</li>
+<li>Red Hat OpenShift 4.21: Configuring the audit log policy; Configuring the monitoring stack (Alertmanager secret, templates); Backing up etcd; Encrypting etcd data; Removing the kubeadmin user; OAuth token configuration.</li>
+<li>Red Hat OpenShift Logging 6.x: ClusterLogForwarder (observability.openshift.io/v1) audit inputs; LokiStack tenants, retention and rules; Logging alerts (AlertingRule).</li>
+<li>Red Hat OpenShift GitOps 1.19+: ArgoCD CR reference (rbac, sso, resourceExclusions, extraConfig); Argo CD docs: Application deletion and finalizers, ApplicationSet preserveResourcesOnDeletion, sync options (Prune, ServerSideApply, Replace), Notifications.</li>
+<li>Prometheus Alertmanager 0.29: configuration (<code>msteamsv2_configs</code>, <code>email_configs</code>, routing, inhibition, templates).</li>
+<li>OADP 1.5 / Velero: Schedules, includeClusterResources, restores.</li>
+<li>Repository documents: <code>docs/01</code> threat model, <code>docs/04</code> policy, <code>docs/13</code> justification, <code>docs/14</code> manual tests.</li></ul>
+<p class="muted">End of study guide.</p>
+</main>
+</div>
+</body>
+</html>

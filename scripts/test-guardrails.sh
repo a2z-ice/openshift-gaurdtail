@@ -73,6 +73,11 @@ expect deny  "cluster-admin dry-run delete GuardrailConfig"    -- as admin -- de
 expect deny  "cluster-admin dry-run delete policy binding"     -- as admin -- delete validatingadmissionpolicybinding guardrails-critical-delete-named --dry-run=server
 expect deny  "cluster-admin dry-run delete approver group"     -- as admin -- delete group $APPROVER_GROUP --dry-run=server
 
+echo "== 2b. only trusted identities may mark an object critical"
+oc -n $NS create configmap tenant --from-literal=a=b --dry-run=client -o yaml | oc apply -f - >/dev/null
+expect deny  "requester (not approver) labels an object critical"   -- as requester -- -n $NS label configmap tenant $PFX/critical=true
+expect allow "approver labels an object critical"                   -- as approver1 -- -n $NS label configmap tenant $PFX/critical=true
+
 echo "== 3. forged approvals are rejected"
 expect deny  "admin writes 2 approvals directly"               -- as admin -- -n $NS annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts),$APP2|$(ts)"
 expect deny  "requester sets requested-by to someone else"     -- as requester -- -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: test" "$PFX/delete-requested-by=$APP1"

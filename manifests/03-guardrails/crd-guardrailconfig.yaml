@@ -79,6 +79,9 @@ spec:
                   type: array
                   default:
                     - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
+                    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server
+                    - system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller
+                    - system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager
                   items: { type: string }
                 privilegedClusterRoles:
                   description: ClusterRoles whose binding changes are flagged by the rbac-escalation audit policy.

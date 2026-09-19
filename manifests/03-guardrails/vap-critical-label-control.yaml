@@ -1,0 +1,101 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-critical-label-control
+#
+# Purpose : only trusted identities may MARK an object as critical. Without this rule any user with
+#           patch rights on one of the protected kinds could add guardrails.example.com/critical=true
+#           to their own object and thereby (a) force the platform team through the approval workflow
+#           for a tenant object, and (b) wedge their namespace in Terminating on cleanup (the namespace
+#           controller cannot delete a critical object). "Critical" is a platform decision.
+# Allowed : exemptUsers, gitopsServiceAccounts (Argo CD applies labels from Git), approverGroups members.
+# Removal of the label stays governed by guardrails-critical-delete rule V2 (needs approvals).
+# Phase   : follows the deletion bindings: 1 [Audit], 2 [Warn, Audit], 3+ [Deny, Audit]
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-critical-label-control
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-critical-label-control
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["argocds", "applications", "applicationsets", "appprojects"]
+      - apiGroups: ["operators.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+      - apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["customresourcedefinitions"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["groups"]
+      - apiGroups: ["loki.grafana.com", "observability.openshift.io", "monitoring.coreos.com", "velero.io", "oadp.openshift.io", "batch"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["*"]
+  variables:
+    - name: newLabels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: newLabelCritical
+      expression: "'guardrails.example.com/critical' in variables.newLabels && variables.newLabels['guardrails.example.com/critical'] == 'true'"
+    - name: oldLabelCritical
+      expression: >-
+        request.operation == 'UPDATE' && has(oldObject.metadata.labels)
+        && 'guardrails.example.com/critical' in oldObject.metadata.labels
+        && oldObject.metadata.labels['guardrails.example.com/critical'] == 'true'
+    - name: isTrusted
+      expression: >-
+        request.userInfo.username in params.spec.exemptUsers
+        || request.userInfo.username in params.spec.gitopsServiceAccounts
+        || (has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups))
+  validations:
+    - expression: "!(variables.newLabelCritical && !variables.oldLabelCritical) || variables.isTrusted"
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL DENIED: only Argo CD, break-glass or members of ' + params.spec.approverGroups.join(',')
+        + ' may mark an object as critical (guardrails.example.com/critical=true). ' + request.userInfo.username
+        + ' is not allowed to label ' + request.resource.resource + ' ' + request.name + '. Add the label in Git instead.'
+  auditAnnotations:
+    - key: label-added
+      valueExpression: >-
+        (variables.newLabelCritical && !variables.oldLabelCritical)
+        ? ('user=' + request.userInfo.username + ' resource=' + request.resource.resource + ' name=' + request.name + ' trusted=' + string(variables.isTrusted))
+        : null
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-critical-label-control
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-critical-label-control
+  paramRef:
+    name: default
+    parameterNotFoundAction: Deny
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    objectSelector:
+      matchLabels:
+        guardrails.example.com/critical: "true"

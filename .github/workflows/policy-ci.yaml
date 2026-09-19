@@ -42,8 +42,8 @@ jobs:
           # 1. the enforce overlay must Deny
           grep -q '"Deny"' manifests/03-guardrails/vap-critical-delete-bindings.yaml
           # 2. the guardrails Application must never carry the cascade finalizer or prune=true
-          ! grep -q 'resources-finalizer.argocd.argoproj.io' manifests/04-argocd/application-guardrails.yaml
-          ! grep -Eq 'prune: *true' manifests/04-argocd/application-guardrails.yaml
+          ! grep -v '^\s*#' manifests/04-argocd/application-guardrails.yaml | grep -q 'resources-finalizer.argocd.argoproj.io'
+          ! grep -v '^\s*#' manifests/04-argocd/application-guardrails.yaml | grep -Eq 'prune: *true'
           # 3. no human identity in exemptUsers
           ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@'
           # 4. minApprovers >= 2

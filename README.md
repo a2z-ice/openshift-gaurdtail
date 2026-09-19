@@ -134,3 +134,6 @@ Any LLM tool can operate this repository with a few hundred tokens of context:
 | 10 | [Rollout plan](docs/10-rollout-plan.md) | phased enablement with exit criteria and rollback |
 | 11 | [Testing & validation](docs/11-testing-and-validation.md) | sign-off evidence |
 | 12 | [Operations & compliance](docs/12-operations-and-compliance.md) | recurring reviews, control mapping |
+| 13 | [Solution justification](docs/13-solution-justification.md) | presenting the design to an architecture/security review board |
+| 14 | [Manual test guide](docs/14-manual-test-guide.md) | step-by-step positive and negative tests with expected output |
+| – | [Study guide (HTML)](html/study-guide.html) | complete technical study material, foundations to corner cases, with the gap-fix implementations |

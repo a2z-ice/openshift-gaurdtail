@@ -26,9 +26,9 @@ audit trail (API-server audit → SIEM + Loki), a **two-person rule for deleting
 | Rule | ≥ `minApprovers` (2) distinct approvers ∈ `gitops-deletion-approvers`, none = requester, executor ∉ approvers, request present, nothing else changed in the same update, approvals wiped if the request changes |
 | Param object | `GuardrailConfig/default` (`guardrails.example.com/v1alpha1`) |
 | Exempt identities | `system:apiserver`, `system:serviceaccount:guardrails-system:breakglass` only |
-| Allowed mutators of critical objects | `system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller` (not exempt from deletion) |
+| Allowed mutators of critical objects | Argo CD identities: `openshift-gitops-argocd-application-controller`, `-argocd-server`, `-applicationset-controller`, and `openshift-gitops-operator-controller-manager` (none exempt from deletion). Only they, break-glass and approvers may **add** the critical label (`guardrails-critical-label-control`) |
 | Groups | `platform-admins` (JIT cluster-admin), `gitops-deletion-approvers`, `gitops-deletion-requesters`, `gitops-operators`, `auditors` |
-| Approval TTL | 4h, enforced by CronJob `guardrails-system/approval-reaper` (remove-only) |
+| Approval TTL | 4h, enforced by CronJob `guardrails-system/approval-reaper` (remove-only; also removes future-dated/invalid timestamps) |
 | Phases | 1 audit `[Audit]` → 2 warn `[Warn,Audit]` → 3 enforce `[Deny,Audit]` → 4 gitops-only mutation `[Deny,Audit]`; selected by `spec.source.path` of Argo CD app `openshift-gitops/guardrails` |
 | Alerts | `guardrail="true"` label; critical → email + Teams (`group_wait 0s`, repeat 30m); key names: `CriticalResourceDeleted`, `CriticalResourceDeleteDenied`, `GuardrailPolicyModified`, `ImpersonationUsed`, `BreakGlassUsed`, `ArgoCDApplicationControllerMissing`, `AuditLogIngestionStalled` |
 | Audit fields (Loki json) | `verb`, `user_username`, `impersonatedUser_username`, `objectRef_resource/_namespace/_name`, `responseStatus_code`, `annotations_guardrails_critical_delete_decision`, `annotations_validation_policy_admission_k8s_io_validation_failure` |
@@ -44,7 +44,7 @@ scripts/execute-deletion.sh <res> <name> [-n ns]          # executor
 scripts/cancel-deletion.sh  <res> <name> [-n ns]
 # health / evidence
 scripts/verify-install.sh
-scripts/test-guardrails.sh                                # 30 cases, scratch ns guardrails-test
+scripts/test-guardrails.sh                                # 32 cases, scratch ns guardrails-test
 scripts/audit-query.sh <object-name>                      # prints LogQL + SPL, runs logcli if available
 # local validation
 for o in manifests/base manifests/overlays/*; do kustomize build "$o" >/dev/null; done; yamllint -c .yamllint manifests
@@ -68,5 +68,9 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server
 | Backups / restore | `manifests/06-backup/*`, `docs/07` |
 | Argo CD specifics | `manifests/04-argocd/*`, `docs/05` |
 | What is NOT covered | `docs/01-threat-model.md` §Residual-risk register |
+| Justify the design to reviewers | `docs/13-solution-justification.md` |
+| Manual test with expected output | `docs/14-manual-test-guide.md` (T-numbered scenarios) |
+| Learn the whole design step by step | `html/study-guide.html` (open in a browser) |
+| Extra hardening (OAuth tokens, VAP health alerts, etcd backup, LDAP sync, SSH lockdown, etcd encryption) | `manifests/07-hardening-extras/*` |
 | Machine-readable facts | `llm/context.yaml` |
 | Shared state / memory | `llm/memory.md` |

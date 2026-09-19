@@ -23,7 +23,7 @@ oc get validatingadmissionpolicy guardrails-critical-delete -o jsonpath='{.statu
 
 ## Functional matrix (`scripts/test-guardrails.sh`)
 
-Creates namespace `guardrails-test` with a critical-labelled ConfigMap and runs 30 cases. Real critical objects are touched only with `--dry-run=server`, which still goes through admission. Two identity modes: impersonation (fast, raises `ImpersonationUsed` on purpose) or four real kubeconfigs (sign-off run).
+Creates namespace `guardrails-test` with a critical-labelled ConfigMap and runs 32 cases. Real critical objects are touched only with `--dry-run=server`, which still goes through admission. Two identity modes: impersonation (fast, raises `ImpersonationUsed` on purpose) or four real kubeconfigs (sign-off run).
 
 | # | Case | Expected (phase 3) |
 |---|---|---|
@@ -51,6 +51,7 @@ Creates namespace `guardrails-test` with a critical-labelled ConfigMap and runs 
 | 22 | approver1 (an approver) executes | **deny** |
 | 23 | requester edits the reason after approvals | **deny** |
 | 24 | executor deletes with two approvals | **allow** → `CriticalResourceDeleted` in Teams + email |
+| 2b.1–2b.2 | requester labels an object critical (deny) / approver does (allow) | **deny** / allow |
 | 25–28 | cancel path: request, approve, cancel by a third party, delete after cancel | allow / allow / allow / **deny** |
 | 29–30 | reaper SA tries to add an approval / removes all approvals | **deny** / allow |
 

@@ -26,7 +26,13 @@ spec:
   reaperUsers:
     - system:serviceaccount:guardrails-system:approval-reaper
   gitopsServiceAccounts:
-    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
+    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller   # applies manifests
+    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server                   # UI/CLI sync & refresh write .operation and the refresh annotation on Applications
+    - system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller       # generates/updates Applications
+    - system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager   # reconciles the ArgoCD CR
+    # add here, after observing ArgoCDDirectMutation in phases 1-3, any controller that legitimately
+    # writes critical objects (e.g. system:serviceaccount:external-secrets:external-secrets for critical Secrets,
+    # system:serviceaccount:openshift-adp:velero for restores). Never a human.
   privilegedClusterRoles:
     - cluster-admin
     - admin

@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# EXAMPLE (not in kustomization; apply deliberately): removes interactive SSH from control-plane
+# nodes. Node-level access is the one path around the admission guardrail (residual risk R2).
+# With this in place the only way onto a master is `oc debug node/...`, which is an API request,
+# audited, and alerted by ControlPlaneNodeAccess.
+# Effects: sshd stays installed for Red Hat support procedures but is disabled; the core user's
+# authorized_keys is emptied. Re-enable by deleting this MachineConfig (rolls the masters).
+# Do NOT apply to workers without a separate decision; do not apply on SNO without console access.
+# ---------------------------------------------------------------------------
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-master-disable-ssh
+  labels:
+    machineconfiguration.openshift.io/role: master
+    guardrails.example.com/critical: "true"
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    passwd:
+      users:
+        - name: core
+          sshAuthorizedKeys: []
+    systemd:
+      units:
+        - name: sshd.service
+          enabled: false
+          mask: true

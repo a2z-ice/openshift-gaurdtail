@@ -1,0 +1,17 @@
+# ---------------------------------------------------------------------------
+# OAuth token lifetimes. Shorter tokens shrink the window in which a stolen approver or admin
+# session can be replayed. Identity providers are configured elsewhere (cluster-config repo);
+# this is a server-side-apply patch touching only tokenConfig.
+#   oc apply --server-side --field-manager=guardrails -f oauth-token-config.yaml
+# The OAuth object is critical (config.openshift.io group).
+# ---------------------------------------------------------------------------
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  tokenConfig:
+    accessTokenMaxAgeSeconds: 28800        # 8 h hard limit
+    accessTokenInactivityTimeout: 2h0m0s   # idle sessions expire

@@ -1,6 +1,6 @@
 # ---------------------------------------------------------------------------
 # App-of-apps that keeps the guardrails in place (self-heal) WITHOUT ever pruning them.
-#   - no resources-finalizer  => deleting this Application does not delete the policies
+#   - no Argo CD cascade finalizer => deleting this Application does not delete the policies
 #   - prune: false            => removing a file from Git does not delete a live policy
 #                                (a deletion still needs the annotation workflow; Argo CD's SA is not exempt)
 #   - selfHeal: true          => any out-of-band change is reverted within the reconcile interval

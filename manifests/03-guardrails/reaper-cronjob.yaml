@@ -153,8 +153,10 @@ data:
           for E in "${ENTRIES[@]}"; do
             U="${E%%|*}"; TS="${E#*|}"
             TS_SEC=$(date -u -d "$TS" +%s 2>/dev/null || echo 0)
-            if (( NOW - TS_SEC > TTL_SEC )); then
-              echo "expire ${RES} ${NS:-<cluster>}/${NAME} approver=${U} at=${TS}"
+            # expired (older than TTL) OR implausible (more than 5 min in the future: an approver cannot
+            # extend their own approval by writing a far-future timestamp) OR unparseable (TS_SEC=0)
+            if (( NOW - TS_SEC > TTL_SEC || TS_SEC > NOW + 300 )); then
+              echo "expire ${RES} ${NS:-<cluster>}/${NAME} approver=${U} at=${TS} (ttl or future/invalid timestamp)"
             else
               KEEP="${KEEP:+${KEEP},}${E}"
             fi

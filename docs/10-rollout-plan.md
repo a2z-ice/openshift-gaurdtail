@@ -46,7 +46,7 @@ Rollback: PR back to phase 1.
 
 Go/no-go checklist (in the change ticket):
 - [ ] Phase 2 exit criteria met and signed by platform + security leads.
-- [ ] `scripts/test-guardrails.sh` PASS on pre-prod (all 30 cases).
+- [ ] `scripts/test-guardrails.sh` PASS on pre-prod (all 32 cases).
 - [ ] Break-glass rehearsal done (docs/09) within the last 30 days.
 - [ ] Restore drill done (docs/07) within the last 90 days.
 - [ ] On-call roster knows the runbooks.

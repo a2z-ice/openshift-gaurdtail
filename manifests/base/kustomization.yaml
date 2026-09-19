@@ -9,4 +9,5 @@ resources:
   - ../01-audit
   - ../05-alerting
   - ../06-backup
+  - ../07-hardening-extras
   - ../04-argocd

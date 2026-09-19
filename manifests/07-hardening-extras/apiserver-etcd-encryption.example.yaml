@@ -1,0 +1,15 @@
+# ---------------------------------------------------------------------------
+# EXAMPLE (not in kustomization): encrypt Secrets, ConfigMaps, Routes, OAuth tokens in etcd.
+# Someone with etcd/snapshot access then cannot read credentials (residual risk R2 mitigation).
+# aesgcm is the current recommendation (AES-256-GCM, key rotation every ~200k writes).
+# Enabling triggers a one-time re-encryption of etcd (10-30 min; watch `oc get openshiftapiserver -o jsonpath='{.items[0].status.conditions[?(@.type=="Encrypted")]}'`).
+# Merge this into 01-audit/apiserver-audit.yaml (same object) or apply as a server-side patch:
+#   oc patch apiserver cluster --type merge -p '{"spec":{"encryption":{"type":"aesgcm"}}}'
+# ---------------------------------------------------------------------------
+apiVersion: config.openshift.io/v1
+kind: APIServer
+metadata:
+  name: cluster
+spec:
+  encryption:
+    type: aesgcm

@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# EXAMPLE (not in kustomization): hourly LDAP group sync so that gitops-deletion-approvers,
+# gitops-deletion-requesters, gitops-operators, platform-admins and auditors are owned by the
+# directory, not by hand-edits. OIDC providers that send a groups claim do not need this.
+# Secrets: ldap-sync (keys bindPassword) and ldap-ca (ca.crt) from the vault.
+# Group membership changes are alerted by PrivilegedRBACChange; add this SA to the alert's
+# exclusion list once the sync is stable: system:serviceaccount:guardrails-system:ldap-group-sync
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ldap-sync-config
+  namespace: guardrails-system
+data:
+  sync.yaml: |
+    kind: LDAPSyncConfig
+    apiVersion: v1
+    url: ldaps://ldap.example.com:636
+    bindDN: cn=openshift-sync,ou=service,dc=example,dc=com
+    bindPassword:
+      file: /etc/ldap-sync/bindPassword
+    ca: /etc/ldap-ca/ca.crt
+    insecure: false
+    groupUIDNameMapping:
+      "cn=ocp-platform-admins,ou=groups,dc=example,dc=com": platform-admins
+      "cn=ocp-gitops-deletion-approvers,ou=groups,dc=example,dc=com": gitops-deletion-approvers
+      "cn=ocp-gitops-deletion-requesters,ou=groups,dc=example,dc=com": gitops-deletion-requesters
+      "cn=ocp-gitops-operators,ou=groups,dc=example,dc=com": gitops-operators
+      "cn=ocp-auditors,ou=groups,dc=example,dc=com": auditors
+    rfc2307:
+      groupsQuery:
+        baseDN: "ou=groups,dc=example,dc=com"
+        scope: sub
+        derefAliases: never
+        filter: (objectClass=groupOfNames)
+        pageSize: 0
+      groupUIDAttribute: dn
+      groupNameAttributes: [cn]
+      groupMembershipAttributes: [member]
+      usersQuery:
+        baseDN: "ou=users,dc=example,dc=com"
+        scope: sub
+        derefAliases: never
+        pageSize: 0
+      userUIDAttribute: dn
+      userNameAttributes: [mail]        # must produce the same username the IdP login produces
+      tolerateMemberNotFoundErrors: true
+      tolerateMemberOutOfScopeErrors: true
+  whitelist.txt: |
+    cn=ocp-platform-admins,ou=groups,dc=example,dc=com
+    cn=ocp-gitops-deletion-approvers,ou=groups,dc=example,dc=com
+    cn=ocp-gitops-deletion-requesters,ou=groups,dc=example,dc=com
+    cn=ocp-gitops-operators,ou=groups,dc=example,dc=com
+    cn=ocp-auditors,ou=groups,dc=example,dc=com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ldap-group-sync
+  namespace: guardrails-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-ldap-group-sync
+rules:
+  - apiGroups: ["user.openshift.io"]
+    resources: ["groups"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-ldap-group-sync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-ldap-group-sync
+subjects:
+  - kind: ServiceAccount
+    name: ldap-group-sync
+    namespace: guardrails-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ldap-group-sync
+  namespace: guardrails-system
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: ldap-group-sync
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: sync
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+              command: ["oc", "adm", "group", "sync", "--sync-config=/etc/config/sync.yaml", "--whitelist=/etc/config/whitelist.txt", "--confirm"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: config, mountPath: /etc/config }
+                - { name: ldap-sync, mountPath: /etc/ldap-sync }
+                - { name: ldap-ca, mountPath: /etc/ldap-ca }
+          volumes:
+            - name: config
+              configMap: { name: ldap-sync-config }
+            - name: ldap-sync
+              secret: { secretName: ldap-sync }
+            - name: ldap-ca
+              secret: { secretName: ldap-ca }

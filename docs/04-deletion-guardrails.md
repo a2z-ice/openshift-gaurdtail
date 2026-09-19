@@ -41,14 +41,16 @@ All rules are evaluated on the **pre-request state** (`oldObject`), so nothing c
 Design notes:
 
 - **Exemptions are minimal**: `system:apiserver` (loopback) and the break-glass SA. Not the garbage collector, not the namespace controller, not OLM, not Argo CD. A controller whose delete is denied simply retries and the denial is alerted, which is the desired behaviour for a critical object.
-- **No clock in CEL** → TTL is enforced by the reaper CronJob (`reaper-cronjob.yaml`, every 10 min); the policy lets that identity only *remove* entries. Approvals are also wiped by V4 whenever the request changes.
+- **No clock in CEL** → TTL is enforced by the reaper CronJob (`reaper-cronjob.yaml`, every 10 min); the policy lets that identity only *remove* entries. The reaper also removes entries whose timestamp is more than 5 minutes in the **future** or unparseable, so an approver cannot extend an approval by writing a far-future time. Approvals are also wiped by V4 whenever the request changes.
 - **Binding A** (`-labelled`) uses `objectSelector` on the critical label. Kubernetes evaluates the selector against `object` **or** `oldObject`, so removing the label in the same request still matches (and V2 denies it). **Binding B** (`-named`) covers the name-protected, low-traffic kinds without a selector. Result: the policy costs nothing on the cluster's ordinary Secret/ConfigMap traffic.
 - **Fail closed**: `failurePolicy: Fail`, `parameterNotFoundAction: Deny`. If `GuardrailConfig/default` is missing, UPDATE/DELETE of critical objects is denied (not the whole cluster, thanks to the bindings' scope).
 - **Type-checking warnings are expected**: `oc get vap guardrails-critical-delete -o yaml` lists warnings such as "undefined field 'spec'" because the policy matches many kinds; evaluation is dynamic. Only a `status.conditions` error or an "expression compile" message is a problem.
 
 ## Companion policies
 
-- `guardrails-gitops-only-mutation` – critical objects may only be *changed* by Argo CD, the reaper (annotations only) or break-glass; a human editing the `ArgoCD` CR or the forwarder by hand is flagged (`ArgoCDDirectMutation`) in phases 1–3 and denied in phase 4. The approval workflow is explicitly allowed (only guardrail annotations change).
+- `guardrails-critical-label-control` – only `gitopsServiceAccounts`, `exemptUsers` or approver-group members may **add** the critical label (CREATE or UPDATE). Without it any tenant with `patch` on a protected kind could mark their own object critical to force the platform team into the workflow or wedge their namespace in Terminating. Bound with the same label `objectSelector`; follows the phase actions.
+
+- `guardrails-gitops-only-mutation` – critical objects may only be *changed* by the Argo CD identities (application-controller, server, applicationset-controller, the GitOps operator), the reaper (annotations only) or break-glass; a human editing the `ArgoCD` CR or the forwarder by hand is flagged (`ArgoCDDirectMutation`) in phases 1–3 and denied in phase 4. The approval workflow is explicitly allowed (only guardrail annotations change).
 - `guardrails-rbac-escalation-audit` – never denies; a binding to `cluster-admin`/`admin`/`guardrails-*` or a change to a privileged group "fails" the validation with `[Warn, Audit]`, which stamps the audit event and warns the caller. `PrivilegedRBACChange` alerts on it.
 
 ## Self-protection
@@ -96,7 +98,7 @@ Through Git instead of `oc`: the approval annotation **cannot** be applied by Ar
 
 ## Verification
 
-See docs/11 and `scripts/test-guardrails.sh` (30 cases). Minimum smoke test after apply:
+See docs/11 and `scripts/test-guardrails.sh` (32 cases). Minimum smoke test after apply:
 
 ```bash
 oc get vap,vapb -l app.kubernetes.io/part-of=guardrails

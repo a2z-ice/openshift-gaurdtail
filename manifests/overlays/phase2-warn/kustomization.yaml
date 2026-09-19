@@ -27,6 +27,13 @@ patches:
         path: /spec/validationActions
         value: ["Warn", "Audit"]
   - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-critical-label-control
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Warn", "Audit"]
+  - target:
       kind: Application
       name: guardrails
     patch: |
