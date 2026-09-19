@@ -31,12 +31,13 @@ Set the optional `PREPROD_KUBECONFIG` repository secret (a token for a `--dry-ru
 
 ```mermaid
 flowchart LR
-  A[PR opened] --> B[policy-ci: lint, build, schema, invariants]
-  B --> C{2 approvals incl. code owners<br/>platform-engineering + security}
-  C --> D[squash-merge to main, signed]
-  D --> E[Argo CD 'guardrails' app: selfHeal, no prune]
-  E --> F[kube-apiserver: Argo CD SA applies; VAP still applies to it]
-  F --> G[audit log + alerts]
+    A["PR opened"] --> B["policy-ci<br/>lint, build, schema, invariants"]
+    B --> C{"2 approvals incl. code owners<br/>platform-engineering + security"}
+    C -- "approved" --> D["squash-merge to main<br/>signed commit"]
+    C -- "changes requested" --> A
+    D --> E["Argo CD app guardrails<br/>selfHeal on, prune off"]
+    E --> F["kube-apiserver<br/>Argo CD SA applies, VAP still applies to it"]
+    F --> G["audit log + alerts"]
 ```
 
 ## Emergency change to the repository

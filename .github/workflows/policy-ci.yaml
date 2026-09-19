@@ -45,12 +45,16 @@ jobs:
           ! grep -q 'resources-finalizer.argocd.argoproj.io' manifests/04-argocd/application-guardrails.yaml
           ! grep -Eq 'prune: *true' manifests/04-argocd/application-guardrails.yaml
           # 3. no human identity in exemptUsers
-          ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@' 
+          ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@'
           # 4. minApprovers >= 2
           test "$(grep -E '^\s+minApprovers:' manifests/03-guardrails/guardrailconfig-default.yaml | awk '{print $2}')" -ge 2
           # 5. no plaintext secrets
           ! grep -RIE 'sig=[A-Za-z0-9_-]{20,}|smtp_auth_password: *[^R]' manifests | grep -v REPLACE
           echo "invariants OK"
+      - name: mermaid diagrams parse (GitHub renders with the same engine)
+        run: |
+          npm install --no-save --silent mermaid@11 jsdom dompurify
+          node scripts/check-mermaid.mjs README.md docs/*.md
       - name: shellcheck scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null

@@ -10,6 +10,7 @@ description: Validate this repository locally (kustomize, yamllint, shell syntax
 for o in manifests/base manifests/overlays/*; do kustomize build "$o" >/dev/null && echo "OK $o"; done
 yamllint -c .yamllint manifests
 bash -n scripts/*.sh
+npm i --no-save mermaid@11 jsdom dompurify && node scripts/check-mermaid.mjs README.md docs/*.md   # diagrams render on GitHub
 # CI invariants (same as .github/workflows/policy-ci.yaml)
 grep -q '"Deny"' manifests/03-guardrails/vap-critical-delete-bindings.yaml
 ! grep -q 'resources-finalizer.argocd.argoproj.io' manifests/04-argocd/application-guardrails.yaml

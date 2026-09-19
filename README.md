@@ -17,50 +17,64 @@ Verified against: OCP 4.21 (Kubernetes 1.34, Alertmanager 0.29.0, Prometheus 3.7
 
 ```mermaid
 flowchart TB
-  subgraph Identity["1 · Identity & RBAC"]
-    IdP[IdP groups: platform-admins (JIT), gitops-deletion-approvers, gitops-deletion-requesters, gitops-operators, auditors]
-  end
-  subgraph API["kube-apiserver"]
-    AuthZ[RBAC] --> VAP["3 · ValidatingAdmissionPolicy<br/>guardrails-critical-delete<br/>(two-person rule, CEL)"]
-    VAP --> Audit["5 · Audit log<br/>WriteRequestBodies + policy annotations"]
-  end
-  subgraph GitOps["2 · Argo CD (openshift-gitops)"]
-    Git[(GitHub: 2 reviewers + CODEOWNERS)] --> ArgoCD[Argo CD app 'guardrails'<br/>selfHeal, Prune=false, no cascade finalizer]
-  end
-  ArgoCD -- "applies (SA not exempt)" --> API
-  Users[Humans / CI] -- "oc / UI" --> API
-  Audit --> Vector[Vector collector<br/>ClusterLogForwarder]
-  Vector --> SIEM[(Splunk / Elastic<br/>system of record, 1-7y, WORM)]
-  Vector --> Loki[(LokiStack audit tenant<br/>90 days)]
-  Loki --> Ruler["6 · Loki ruler<br/>AlertingRules"]
-  Prom["6 · Prometheus<br/>PrometheusRules (Argo CD absent, ns Terminating, ingestion stalled)"]
-  Ruler --> AM["7 · Alertmanager 0.29<br/>route guardrail=true, group_wait 0s"]
-  Prom --> AM
-  AM --> Email[Email: platform + security on-call]
-  AM --> Teams[Microsoft Teams channel<br/>Workflows webhook, adaptive card]
-  OADP["8 · OADP schedules<br/>6h / 30d, daily / 90d"] -.-> API
+    subgraph L1["1 - Identity and RBAC"]
+        IdP["IdP groups<br/>platform-admins JIT<br/>gitops-deletion-approvers<br/>gitops-deletion-requesters<br/>gitops-operators, auditors"]
+    end
+    subgraph L2["2 - Argo CD, openshift-gitops"]
+        Git[("GitHub<br/>2 reviewers + CODEOWNERS")]
+        ArgoCD["Argo CD app guardrails<br/>selfHeal on, prune off<br/>no cascade finalizer"]
+        Git --> ArgoCD
+    end
+    subgraph API["kube-apiserver"]
+        RBAC["RBAC"]
+        VAP["3 - ValidatingAdmissionPolicy<br/>guardrails-critical-delete<br/>two-person rule in CEL"]
+        Audit["5 - Audit log<br/>WriteRequestBodies + policy annotations"]
+        RBAC --> VAP --> Audit
+    end
+    Users["Humans and CI<br/>oc or console"] --> RBAC
+    IdP -.-> Users
+    ArgoCD -- "applies, SA is not exempt" --> RBAC
+    Audit --> Vector["Vector collector<br/>ClusterLogForwarder"]
+    Vector --> SIEM[("Splunk or Elastic<br/>system of record, WORM")]
+    Vector --> Loki[("LokiStack audit tenant<br/>90 days")]
+    Loki --> Ruler["6 - Loki ruler<br/>AlertingRules on audit events"]
+    Prom["6 - Prometheus<br/>PrometheusRules: Argo CD missing,<br/>namespace Terminating, ingestion stalled"]
+    Ruler --> AM["7 - Alertmanager 0.29<br/>route guardrail=true, group_wait 0s"]
+    Prom --> AM
+    AM --> Email["Email<br/>platform + security on-call"]
+    AM --> Teams["Microsoft Teams channel<br/>Workflows webhook, adaptive card"]
+    OADP["8 - OADP schedules<br/>6h / 30d and daily / 90d"] -.-> API
+    classDef control fill:#fde7e7,stroke:#b00020,color:#000
+    classDef detect fill:#fff4e0,stroke:#b36b00,color:#000
+    classDef notify fill:#e6f2ff,stroke:#0b5cad,color:#000
+    class VAP control
+    class Ruler,Prom,Audit detect
+    class AM,Email,Teams notify
 ```
 
 ## The deletion workflow in one picture
 
 ```mermaid
 sequenceDiagram
-  participant R as Requester (group gitops-deletion-requesters)
-  participant A1 as Approver 1 (gitops-deletion-approvers)
-  participant A2 as Approver 2
-  participant E as Executor
-  participant API as kube-apiserver + VAP
-  participant AM as Alertmanager → Email + Teams
-  R->>API: annotate delete-request="CHG…: reason", delete-requested-by=<me>
-  API-->>AM: info: CriticalDeletionApprovalRecorded
-  A1->>API: append delete-approvals "<a1>|<ts>"
-  API->>API: CEL: a1 == caller, a1 ∈ approver group, a1 ≠ requester, nothing else changed
-  A2->>API: append "<a2>|<ts>"
-  E->>API: oc delete
-  API->>API: CEL: request present, ≥2 distinct approvers, executor ∉ approvers
-  API-->>E: 200 deleted
-  API-->>AM: CRITICAL: CriticalResourceDeleted (audit) + ArgoCDInstanceMissing (metrics)
-  Note over API: Any step that fails the CEL rules → 403 + CriticalResourceDeleteDenied alert
+    autonumber
+    participant R as Requester
+    participant A1 as Approver 1
+    participant A2 as Approver 2
+    participant E as Executor
+    participant API as kube-apiserver + VAP
+    participant AM as Alertmanager
+    R->>API: annotate delete-request and delete-requested-by = own username
+    API-->>AM: info CriticalDeletionApprovalRecorded
+    A1->>API: append delete-approvals entry approver1|timestamp
+    Note over API: CEL checks: entry names the caller, caller in approver group,<br/>caller is not the requester, nothing else changed
+    A2->>API: append delete-approvals entry approver2|timestamp
+    E->>API: oc delete
+    Note over API: CEL checks: request present, 2+ distinct approvers,<br/>executor is not an approver
+    API-->>E: 200 deleted
+    API-->>AM: CRITICAL CriticalResourceDeleted from audit log
+    API-->>AM: CRITICAL ArgoCDApplicationControllerMissing from metrics
+    AM-->>R: Email + Microsoft Teams card
+    Note over R,AM: Any step that fails a CEL rule returns 403 and raises CriticalResourceDeleteDenied
 ```
 
 ## Repository layout
