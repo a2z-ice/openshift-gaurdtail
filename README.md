@@ -148,5 +148,6 @@ Any LLM tool can operate this repository with a few hundred tokens of context:
 | 15 | [Implementation guide](docs/15-implementation-guide.md) | the ordered, step-by-step rollout with verification, rollback and a tracking table |
 | 16 | [Production readiness review](docs/16-production-readiness-review.md) | independent audit findings, what was fixed, and the 100 % test traceability matrix |
 | 17 | [Impersonation control](docs/17-impersonation-control.md) | `--as` works only for reads, access reviews and dry-runs; how admission tells a real session from an impersonated one |
+| 18 | [The story](docs/18-the-story.md) | Narrative for leaders and engineers: what the project solves, why and how, every layer and file with what it solves, roles, rollout and decisions to approve |
 | – | [HTML portal](html/index.html) | entry point with summary and navigation to the study guide and HTML versions of every document (`node scripts/build-html-docs.mjs` regenerates `html/docs/`) |
 | – | [Study guide (HTML)](html/study-guide.html) | complete technical study material, foundations to corner cases, with the gap-fix implementations |

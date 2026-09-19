@@ -76,6 +76,7 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server
 | What is NOT covered | `docs/01-threat-model.md` §Residual-risk register |
 | Audit findings, fixes, test traceability | `docs/16-production-readiness-review.md` |
 | Impersonation: why `--as` writes are denied | `docs/17-impersonation-control.md` |
+| Explain the project to leaders or a new team member | `docs/18-the-story.md` (Part 1 non-technical, Part 2 file-by-file) |
 | Justify the design to reviewers | `docs/13-solution-justification.md` |
 | Manual test with expected output | `docs/14-manual-test-guide.md` (T-numbered scenarios) |
 | Learn the whole design step by step | `html/index.html` (portal) → `html/study-guide.html`; `html/docs/*.html` are generated from the Markdown by `scripts/build-html-docs.mjs` (regenerate after editing docs) |
