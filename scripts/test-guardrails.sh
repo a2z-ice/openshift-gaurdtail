@@ -40,16 +40,21 @@ echo "Bindings: delete=$DELETE_ACTIONS  label-control=$LABEL_ACTIONS  gitops-onl
 echo "Evidence -> $LOG"
 
 # ---- identities ------------------------------------------------------------------------------------------
+# Impersonation mode forges the human authentication marker (userInfo.extra) so the impersonated session looks
+# real to guardrails-impersonation-dry-run-only. That requires a credential allowed to impersonate userextras
+# (system:masters / the installer kubeconfig on PRE-PROD); JIT platform-admins cannot, by design (docs/17).
+HUMAN_EXTRA="${HUMAN_EXTRA:-scopes.authorization.openshift.io=user:full}"
+SA_EXTRA="${SA_EXTRA:-authentication.kubernetes.io/credential-id=JTI=test-run}"
 as() { # as <role> -- <oc args>
   local role="$1"; shift; shift
   if [[ "$IMPERSONATE" == "true" ]]; then
     case "$role" in
-      requester) oc --as="$REQ_USER"  --as-group="$REQUESTER_GROUP" --as-group=system:authenticated "$@" ;;
-      approver1) oc --as="$APP1"      --as-group="$APPROVER_GROUP"  --as-group=system:authenticated "$@" ;;
-      approver2) oc --as="$APP2"      --as-group="$APPROVER_GROUP"  --as-group=system:authenticated "$@" ;;
-      executor)  oc --as="$EXEC_USER" --as-group="$REQUESTER_GROUP" --as-group=system:authenticated "$@" ;;
-      approver1-executor) oc --as="$APP1" --as-group="$APPROVER_GROUP" --as-group="$REQUESTER_GROUP" --as-group=system:authenticated "$@" ;;
-      developer) oc --as="$DEV_USER"  --as-group=system:authenticated "$@" ;;
+      requester) oc --as="$REQ_USER"  --as-group="$REQUESTER_GROUP" --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
+      approver1) oc --as="$APP1"      --as-group="$APPROVER_GROUP"  --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
+      approver2) oc --as="$APP2"      --as-group="$APPROVER_GROUP"  --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
+      executor)  oc --as="$EXEC_USER" --as-group="$REQUESTER_GROUP" --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
+      approver1-executor) oc --as="$APP1" --as-group="$APPROVER_GROUP" --as-group="$REQUESTER_GROUP" --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
+      developer) oc --as="$DEV_USER"  --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" "$@" ;;
       admin)     oc "$@" ;;
     esac
   else
@@ -205,7 +210,7 @@ else
   SKIP=$((SKIP+1)); printf '  \033[1;33mSKIP\033[0m %s\n' "reaper job could not be started/completed (check GuardrailReaperFailing)"
 fi
 if [[ "$IMPERSONATE" == "true" ]]; then
-  expect "$DENY_DEL" "reaper SA tries to ADD an approval"                          -- oc --as=system:serviceaccount:guardrails-system:approval-reaper -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$APP2|$(ts)"
+  expect "$DENY_DEL" "reaper SA tries to ADD an approval"                          -- oc --as=system:serviceaccount:guardrails-system:approval-reaper --as-user-extra="$SA_EXTRA" -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$APP2|$(ts)"
 else
   expect skip "reaper SA tries to ADD an approval (impersonation disabled)" -- true
 fi
@@ -213,17 +218,31 @@ fi
 echo "== 9. the GitOps path is pre-approved: Argo CD controllers may delete/prune critical objects (Git ruleset is the approval)"
 mk_cm gitmanaged; as approver1 -- -n "$NS" label configmap gitmanaged "$PFX/critical=true" --overwrite >/dev/null
 if [[ "$IMPERSONATE" == "true" ]]; then
-  expect allow "Argo CD application-controller identity deletes a critical object (GitOps path)" -- oc --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller -n "$NS" delete configmap gitmanaged
-  expect "$DENY_DEL" "argocd-server identity (UI/CLI, not Git) deletes a critical object"        -- oc --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server -n "$NS" delete configmap victim2 --dry-run=server
+  expect allow "Argo CD application-controller identity deletes a critical object (GitOps path)" -- oc --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller --as-user-extra="$SA_EXTRA" -n "$NS" delete configmap gitmanaged
+  expect "$DENY_DEL" "argocd-server identity (UI/CLI, not Git) deletes a critical object"        -- oc --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server --as-user-extra="$SA_EXTRA" -n "$NS" delete configmap victim2 --dry-run=server
 else
   expect skip "GitOps-path identity cases (impersonation disabled; covered by manual T7.1/T7.3)" -- true
   oc -n "$NS" delete configmap gitmanaged --ignore-not-found >/dev/null 2>&1 || true
 fi
 
-echo "== 10. rbac-escalation policy warns (never blocks) and stamps the audit event"
+echo "== 10. impersonation is dry-run only (guardrails-impersonation-dry-run-only)"
+IMP_ACTIONS="$(actions guardrails-impersonation-dry-run-only)"; DENY_IMP="$(want_deny "$IMP_ACTIONS")"
+if [[ "$IMPERSONATE" == "true" ]]; then
+  expect "$DENY_IMP" "impersonated human WITHOUT marker writes (non-dry-run)"          -- oc --as="$DEV_USER" --as-group=system:authenticated -n "$NS" create configmap imp-write --from-literal=a=b
+  expect allow       "impersonated human WITHOUT marker writes with --dry-run=server"   -- oc --as="$DEV_USER" --as-group=system:authenticated -n "$NS" create configmap imp-write --from-literal=a=b --dry-run=server
+  expect allow       "impersonated human WITHOUT marker: oc auth can-i (access review)" -- oc --as="$DEV_USER" --as-group=system:authenticated auth can-i get configmaps -n "$NS"
+  expect "$DENY_IMP" "impersonated break-glass SA WITHOUT bound-token marker deletes"   -- oc --as=system:serviceaccount:guardrails-system:breakglass -n "$NS" delete configmap victim2
+  expect "$DENY_DEL" "impersonated break-glass WITHOUT marker is NOT exempt (dry-run shows the deletion rule, not the exemption)" -- oc --as=system:serviceaccount:guardrails-system:breakglass -n "$NS" delete configmap victim2 --dry-run=server
+  expect "$DENY_DEL" "impersonated approver WITHOUT marker cannot approve (even dry-run)" -- oc --as="$APP2" --as-group="$APPROVER_GROUP" --as-group=system:authenticated -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$APP2|$(ts)" --dry-run=server
+  oc -n "$NS" delete configmap imp-write --ignore-not-found >/dev/null 2>&1 || true
+else
+  expect skip "impersonation cases (impersonation disabled; covered by manual T17)" -- true
+fi
+
+echo "== 11. rbac-escalation policy warns (never blocks) and stamps the audit event"
 expect_warn "creating a cluster-admin binding is FLAGGED" "FLAGGED FOR AUDIT" -- as admin -- create clusterrolebinding guardrails-test-escalation --clusterrole=cluster-admin --user=nobody@example.com --dry-run=server
 
-echo "== 11. cleanup through the workflow (proves the namespace is not left Terminating)"
+echo "== 12. cleanup through the workflow (proves the namespace is not left Terminating)"
 oc -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-approvals-" >/dev/null 2>&1 || true
 workflow_delete victim2
 if [[ "$(oc -n "$NS" get cm tenant -o jsonpath="{.metadata.labels.$(echo "$PFX" | sed 's/\./\\./g')/critical}" 2>/dev/null)" == "true" ]]; then workflow_delete tenant; fi
@@ -233,5 +252,5 @@ sleep 5; PH="$(oc get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo
 echo "namespace $NS: ${PH}"
 
 echo; echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP  (evidence: $LOG)"
-echo "Now confirm delivery: CriticalResourceDeleted for configmap $NS/victim (email+Teams), GitOpsCriticalDeletionApplied for $NS/gitmanaged (Teams), CriticalResourceDeleteDenied (phase>=3) or CriticalDeleteWouldBeDenied (phase 1/2), PrivilegedRBACChange, ImpersonationUsed + PrivilegedIdentityImpersonated (impersonation mode)."
+echo "Now confirm delivery: CriticalResourceDeleted for configmap $NS/victim (email+Teams), GitOpsCriticalDeletionApplied for $NS/gitmanaged (Teams), CriticalResourceDeleteDenied (phase>=3) or CriticalDeleteWouldBeDenied (phase 1/2), PrivilegedRBACChange, ImpersonationUsed + PrivilegedIdentityImpersonated + ImpersonatedWriteDenied (impersonation mode)."
 [[ $FAIL -eq 0 ]]

@@ -11,7 +11,7 @@ An admission policy decides based on `request.userInfo`. If identities are share
 
    | Group | Purpose | Cluster RBAC | Argo CD RBAC |
    |---|---|---|---|
-   | `platform-admins` | emergency/major changes; **empty at rest**, JIT via PIM | `cluster-admin` (still subject to the guardrail) | `role:admin` |
+   | `platform-admins` | emergency/major changes; **empty at rest**, JIT via PIM | `guardrails-platform-admin` (all verbs except impersonate/escalate/bind) + `guardrails-impersonator` | `role:admin` |
    | `gitops-deletion-approvers` | approve deletions (≥ 4 people, ≥ 2 teams) | `guardrails-approver` (read + patch, no delete) | `role:readonly` |
    | `gitops-deletion-requesters` | request + execute deletions | `guardrails-approver` + `guardrails-executor` | – |
    | `gitops-operators` | day-2 Argo CD operations | none beyond Argo CD | `role:operator` (no delete) |
@@ -19,9 +19,9 @@ An admission policy decides based on `request.userInfo`. If identities are share
 
 3. **Remove `kubeadmin`** once an IdP admin login is proven: `oc delete secret kubeadmin -n kube-system`. The `KubeadminOrSystemAdminUsed` alert then catches any reappearance.
 4. **Vault the installer kubeconfig** (`auth/kubeconfig`, identity `system:admin`, bypasses OAuth and RBAC audit attribution beyond the CN). Store it under dual control; every use is a P1 alert.
-5. **No `User` subjects on `cluster-admin`.** Only the `platform-admins` group and the break-glass SA are bound. `scripts/verify-install.sh` counts violations.
+5. **Nothing but `system:masters` on `cluster-admin`.** Neither users nor groups nor the break-glass SA are bound to `cluster-admin` any more; `scripts/verify-install.sh` checks both and also that no custom ClusterRole grants `impersonate` on `userextras`.
 6. **Break-glass is a service account, not a person.** `guardrails-system/breakglass` is bound to `cluster-admin` and listed in `GuardrailConfig.spec.exemptUsers`. Only the `breakglass-custodians` group (Role `guardrails-breakglass-custodian`, `create` on `serviceaccounts/token` for that one SA) and JIT cluster-admins can mint its token (`oc create token breakglass -n guardrails-system --duration=1h`); minting raises `PrivilegedTokenMinted`, every use raises `BreakGlassUsed`. Bound tokens cannot be revoked, so the duration is short and the mint is the audited event. Procedure in docs/09.
-7. **Impersonation is an incident.** `cluster-admin` can `--as=approver1` (forged approval) or `--as=system:serviceaccount:guardrails-system:breakglass` / the Argo CD controller (one-command bypass); there is no admission-side way to distinguish that. `ImpersonationUsed` (any write via impersonation) and `PrivilegedIdentityImpersonated` (impersonating an exempt/trusted identity) are P1 to the security channel and the audit event names both identities. This is why JIT `platform-admins` is a hard prerequisite, not a recommendation. Keep `impersonate` out of every custom role. Note: `oc auth can-i --as=...` is a SubjectAccessReview and is excluded from the alert.
+7. **Impersonation is for checking, never for changing.** Humans and break-glass are bound to `guardrails-platform-admin` (every verb except `impersonate`, `escalate`, `bind`), never to `cluster-admin`; JIT admins additionally get `guardrails-impersonator` (`impersonate` on users, groups, serviceaccounts, never `userextras`). Because a real session carries authentication markers in `userInfo.extra` that an impersonator cannot forge, admission honours exemptions and approver status only with the marker and denies any non-dry-run write under impersonation (`guardrails-impersonation-dry-run-only`). `oc auth can-i --as` and `--dry-run=server --as` keep working. Full design and corner cases: docs/17.
 
 ## Why RBAC alone is not enough (and why it is still needed)
 

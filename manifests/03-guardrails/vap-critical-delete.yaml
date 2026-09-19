@@ -145,22 +145,29 @@ spec:
         || (request.resource.group == 'olm.operatorframework.io' && oldObject.metadata.name.contains('gitops'))
     - name: isCritical
       expression: "variables.labelCritical || variables.nameCritical"
-    # ---- who is asking
+    # ---- who is asking (privileged SA identities count only with a bound-token marker; humans only with the
+    #      OAuth marker: an impersonated copy of either has no extras and is treated as an ordinary user)
+    - name: extra
+      expression: "has(request.userInfo.extra) ? request.userInfo.extra : {}"
+    - name: boundToken
+      expression: "!params.spec.requireBoundTokenForPrivileged || 'authentication.kubernetes.io/credential-id' in variables.extra"
+    - name: humanMarker
+      expression: "params.spec.humanAuthExtraKey == '' || params.spec.humanAuthExtraKey in variables.extra"
     - name: isGitOps
-      expression: "request.userInfo.username in params.spec.gitopsControllers"
+      expression: "request.userInfo.username in params.spec.gitopsControllers && variables.boundToken"
     - name: isExempt
-      expression: "request.userInfo.username in params.spec.exemptUsers || variables.isGitOps"
+      expression: "request.userInfo.username == 'system:apiserver' || (request.userInfo.username in params.spec.exemptUsers && variables.boundToken) || variables.isGitOps"
     - name: isReaper
-      expression: "request.userInfo.username in params.spec.reaperUsers"
+      expression: "request.userInfo.username in params.spec.reaperUsers && variables.boundToken"
     - name: isOlmCsvReplacement
       expression: >-
         request.operation == 'DELETE' && request.resource.group == 'operators.coreos.com'
         && request.resource.resource == 'clusterserviceversions'
-        && request.userInfo.username in params.spec.olmServiceAccounts"
+        && request.userInfo.username in params.spec.olmServiceAccounts && variables.boundToken"
     - name: isApprover
-      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups)"
+      expression: "variables.humanMarker && has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups)"
     - name: isRequester
-      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.requesterGroups || g in params.spec.approverGroups)"
+      expression: "variables.humanMarker && has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.requesterGroups || g in params.spec.approverGroups)"
     # ---- guardrail annotations, old and new
     - name: oldRequest
       expression: "'guardrails.example.com/delete-request' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-request'] : ''"

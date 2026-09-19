@@ -50,5 +50,10 @@ spec:
     - platform-admins
     - gitops-deletion-approvers
     - gitops-deletion-requesters
+  # Anti-impersonation markers (docs/17). A real OAuth session carries scopes.authorization.openshift.io in
+  # userInfo.extra; a real service-account token carries authentication.kubernetes.io/credential-id. Impersonated
+  # sessions carry neither, because no human role may impersonate userextras.
+  humanAuthExtraKey: scopes.authorization.openshift.io
+  requireBoundTokenForPrivileged: true
   approvalTTL: 4h
   runbookURL: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md

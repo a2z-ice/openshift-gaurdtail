@@ -426,6 +426,26 @@ $ sleep 1260        # 10 min of silence in the rate window + for: 10m = about 20
 → configmap/victim2 annotated     (cluster-admin CAN impersonate: this is residual risk R1)
 </code></pre>
 <p>→ Teams/email (security): 🔴 <code>ImpersonationUsed</code>: <code>admin@example.com impersonated a1@example.com for a write (patch configmaps)</code> within ~1 min. Audit tail shows <code>imp=a1@example.com</code>. This is the proof that a forged approval is always attributable.</p>
+<h2>12b. Impersonation is dry-run only ★ (docs/17)</h2>
+<p>As a JIT admin (<code>platform-admins</code>, bound to <code>guardrails-platform-admin</code> + <code>guardrails-impersonator</code>):</p>
+<pre><code class="language-bash">$ as-admin auth can-i impersonate userextras
+→ no
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b
+→ Error from server (Forbidden): configmaps &quot;imp&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-impersonation-dry-run-only&#39; with binding &#39;guardrails-impersonation-dry-run-only&#39; denied request: GUARDRAIL DENIED: dev@example.com has no authentication marker (scopes.authorization.openshift.io), so this session is impersonated or uses a legacy token. Impersonation may only be used with --dry-run=server or for reads ...
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b --dry-run=server
+→ configmap/imp created (server dry run)
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b --dry-run=client
+→ configmap/imp created (dry run)                       (never reaches the server)
+$ as-admin --as=dev@example.com auth can-i create configmaps -n $NS
+→ yes                                                    (access reviews are exempt from the policy)
+$ as-admin --as=a1@example.com --as-group=gitops-deletion-approvers -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot; --dry-run=server
+→ Error from server (Forbidden): ... &#39;guardrails-critical-delete&#39; ... invalid change to guardrails.example.com/delete-approvals by a1@example.com ...   (no marker → not an approver, even in dry-run)
+$ as-admin --as=system:serviceaccount:guardrails-system:breakglass -n openshift-gitops delete argocd openshift-gitops --dry-run=server
+→ Error from server (Forbidden): ... &#39;guardrails-critical-delete&#39; ... GUARDRAIL DENIED: deleting critical argocds ...   (impersonated break-glass is not exempt)
+$ as-admin --as=dev@example.com --as-user-extra=scopes.authorization.openshift.io=user:full -n $NS create configmap imp --from-literal=a=b
+→ Error from server (Forbidden): userextras.authentication.k8s.io &quot;scopes.authorization.openshift.io&quot; is forbidden: User &quot;admin@example.com&quot; cannot impersonate resource &quot;userextras/scopes.authorization.openshift.io&quot; ...   (markers cannot be forged)
+</code></pre>
+<p>Teams/email (security): 🔴 <code>ImpersonatedWriteDenied</code> for the first attempt; no alert for the dry-runs or the access review.</p>
 <h2>13. Break-glass</h2>
 <p>Two custodians (<code>breakglass-custodians</code>), an incident ticket, pre-prod.</p>
 <pre><code class="language-bash">$ as-a1 -n guardrails-system create token breakglass --duration=10m
@@ -606,6 +626,15 @@ $ as-admin get ns $NS
 <td></td>
 </tr>
 <tr>
+<td>T12b</td>
+<td>impersonation dry-run only</td>
+<td>writes denied, dry-run/can-i allowed, markers unforgeable</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
 <td>T13</td>
 <td>break-glass</td>
 <td>non-custodian cannot mint; custodian mint paged; use paged</td>
@@ -644,7 +673,7 @@ $ as-admin get ns $NS
 </tbody></table>
 <p>Sign-off requires every row filled, zero unexpected results, and the evidence attached to the change ticket for the next phase.</p>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a></p>
 </main>
 <footer>Generated from <code>docs/14-manual-test-guide.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

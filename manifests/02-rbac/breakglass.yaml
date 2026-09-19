@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------------------
 # Break-glass identity and its custodians.
-# The SA is the ONLY non-loopback identity exempt from the two-person rule. Its token is minted on demand
+# The SA is the ONLY non-loopback identity exempt from the two-person rule (its exemption is honoured only
+# when the request carries a bound-token credential-id, i.e. a real token, not an impersonated copy). Its token is minted on demand
 # (`oc create token breakglass -n guardrails-system --duration=1h`) by a member of breakglass-custodians,
 # with a second custodian present and an incident ticket open. Minting is alerted (BreakGlassTokenMinted),
 # every request made with the token is alerted (BreakGlassUsed). A minted token cannot be revoked before it
@@ -28,7 +29,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: cluster-admin
+  name: guardrails-platform-admin      # everything except impersonate/escalate/bind
 subjects:
   - kind: ServiceAccount
     name: breakglass

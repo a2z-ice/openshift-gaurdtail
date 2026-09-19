@@ -275,6 +275,24 @@ spec:
           annotations:
             summary: "{{ $labels.user_username }} impersonated {{ $labels.impersonatedUser_username }} for a write ({{ $labels.verb }} {{ $labels.objectRef_resource }})"
             description: "Impersonating an approver is the primary way to forge an approval. Any write via impersonation is treated as an incident."
+        - alert: ImpersonatedWriteDenied
+          expr: |
+            sum by (user_username, impersonatedUser_username, verb, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | responseStatus_code >= 400
+                | annotations_validation_policy_admission_k8s_io_validation_failure =~ ".*guardrails-impersonation-dry-run-only.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "Impersonated write BLOCKED: {{ $labels.user_username }} as {{ $labels.impersonatedUser_username }} tried {{ $labels.verb }} {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            description: "Impersonation is only permitted with --dry-run=server or for reads. A non-dry-run write by an identity without its authentication marker was denied by guardrails-impersonation-dry-run-only. Treat as an attempted bypass."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/17-impersonation-control.md#respond
         - alert: PrivilegedIdentityImpersonated
           expr: |
             sum by (user_username, impersonatedUser_username, verb, objectRef_resource, objectRef_name) (

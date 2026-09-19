@@ -109,6 +109,21 @@ spec:
                   type: array
                   default: ["platform-admins", "gitops-deletion-approvers", "gitops-deletion-requesters"]
                   items: { type: string }
+                humanAuthExtraKey:
+                  description: >-
+                    Name of the userInfo.extra key that every REAL human session carries and an impersonated session
+                    cannot (no human role holds impersonate on userextras). OpenShift OAuth sets
+                    scopes.authorization.openshift.io. Set to "" to disable the human marker (e.g. external OIDC
+                    without extras); the service-account marker (bound-token credential-id) is independent.
+                  type: string
+                  default: "scopes.authorization.openshift.io"
+                requireBoundTokenForPrivileged:
+                  description: >-
+                    When true, exempt/trusted/reaper/OLM service-account identities are honoured only if the request
+                    carries authentication.kubernetes.io/credential-id (a bound token). An impersonated copy of the
+                    identity has no such extra and is treated as an ordinary user.
+                  type: boolean
+                  default: true
                 approvalTTL:
                   description: How long an approval stays valid (Go duration). Enforced by the reaper CronJob, not by admission.
                   type: string

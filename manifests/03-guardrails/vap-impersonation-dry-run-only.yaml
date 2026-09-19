@@ -1,0 +1,97 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-impersonation-dry-run-only
+#
+# Purpose : impersonation (oc --as / --as-group) may be used to CHECK, never to CHANGE.
+#           Reads and access reviews are unaffected (they do not pass through admission or are
+#           side-effect free); server-side dry-runs are allowed; every other write by an
+#           impersonated identity is denied. Client-side dry-runs never reach the server.
+#
+# How admission tells an impersonated session from a real one (it cannot see the Impersonate
+# headers): a REAL session carries authentication "extra" fields that an impersonator cannot forge
+# because no human role holds `impersonate` on `userextras` (02-rbac/platform-admin.yaml):
+#   humans           userInfo.extra[params.spec.humanAuthExtraKey]   (OpenShift OAuth: scopes.authorization.openshift.io)
+#   service accounts userInfo.extra["authentication.kubernetes.io/credential-id"]  (bound tokens, JTI)
+# A write whose identity lacks the expected marker is impersonated (or uses a legacy secret-based SA
+# token, which this design does not permit for privileged identities).
+#
+# Scope: all writes, all groups, except authorization/authentication review APIs (used by
+#   `oc auth can-i --as`) and system:* controllers. Only human identities and the privileged
+#   service-account identities listed in GuardrailConfig are checked; ordinary workload SAs are not,
+#   so a stray legacy token on a tenant workload cannot break it.
+# Phase   : follows the deletion bindings: 1 [Audit], 2 [Warn, Audit], 3+ [Deny, Audit]
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-impersonation-dry-run-only
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-impersonation-dry-run-only
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*"]
+  matchConditions:
+    - name: not-an-access-review
+      expression: "!(request.resource.group in ['authorization.k8s.io', 'authorization.openshift.io', 'authentication.k8s.io'])"
+    - name: not-a-system-component
+      expression: "!request.userInfo.username.startsWith('system:') || request.userInfo.username.startsWith('system:serviceaccount:')"
+  variables:
+    - name: extra
+      expression: "has(request.userInfo.extra) ? request.userInfo.extra : {}"
+    - name: isServiceAccount
+      expression: "request.userInfo.username.startsWith('system:serviceaccount:')"
+    - name: hasBoundToken
+      expression: "'authentication.kubernetes.io/credential-id' in variables.extra"
+    - name: hasHumanMarker
+      expression: "params.spec.humanAuthExtraKey == '' || params.spec.humanAuthExtraKey in variables.extra"
+    - name: isPrivilegedSA
+      expression: >-
+        variables.isServiceAccount && (
+          request.userInfo.username in params.spec.exemptUsers
+          || request.userInfo.username in params.spec.gitopsControllers
+          || request.userInfo.username in params.spec.gitopsServiceAccounts
+          || request.userInfo.username in params.spec.reaperUsers
+          || request.userInfo.username in params.spec.olmServiceAccounts )
+    - name: impersonated
+      expression: >-
+        (variables.isPrivilegedSA && params.spec.requireBoundTokenForPrivileged && !variables.hasBoundToken)
+        || (!variables.isServiceAccount && !variables.hasHumanMarker)
+    - name: dryRun
+      expression: "has(request.dryRun) && request.dryRun"
+  validations:
+    - expression: "variables.dryRun || !variables.impersonated"
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL DENIED: ' + request.userInfo.username + ' has no authentication marker ('
+        + (variables.isServiceAccount ? 'authentication.kubernetes.io/credential-id' : params.spec.humanAuthExtraKey)
+        + '), so this session is impersonated or uses a legacy token. Impersonation may only be used with --dry-run=server or for reads; log in as yourself to '
+        + request.operation + ' ' + request.resource.resource + ' ' + request.name + '.'
+  auditAnnotations:
+    - key: impersonated-write
+      valueExpression: >-
+        variables.impersonated
+        ? ('user=' + request.userInfo.username + ' op=' + request.operation + ' resource=' + request.resource.resource + ' name=' + request.name + ' dryRun=' + string(variables.dryRun))
+        : null
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-impersonation-dry-run-only
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-impersonation-dry-run-only
+  paramRef:
+    name: default
+    parameterNotFoundAction: Allow      # a missing GuardrailConfig must not block every write on the cluster
+  validationActions: ["Deny", "Audit"]

@@ -34,6 +34,13 @@ patches:
         path: /spec/validationActions
         value: ["Warn", "Audit"]
   - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-impersonation-dry-run-only
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Warn", "Audit"]
+  - target:
       kind: Application
       name: guardrails
     patch: |

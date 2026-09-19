@@ -63,12 +63,18 @@ spec:
         request.operation == 'UPDATE' && has(oldObject.metadata.labels)
         && 'guardrails.example.com/critical' in oldObject.metadata.labels
         && oldObject.metadata.labels['guardrails.example.com/critical'] == 'true'
+    - name: extra
+      expression: "has(request.userInfo.extra) ? request.userInfo.extra : {}"
+    - name: boundToken
+      expression: "!params.spec.requireBoundTokenForPrivileged || 'authentication.kubernetes.io/credential-id' in variables.extra"
+    - name: humanMarker
+      expression: "params.spec.humanAuthExtraKey == '' || params.spec.humanAuthExtraKey in variables.extra"
     - name: isTrusted
       expression: >-
-        request.userInfo.username in params.spec.exemptUsers
-        || request.userInfo.username in params.spec.gitopsControllers
-        || request.userInfo.username in params.spec.gitopsServiceAccounts
-        || (has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups))
+        (variables.boundToken && (request.userInfo.username in params.spec.exemptUsers
+          || request.userInfo.username in params.spec.gitopsControllers
+          || request.userInfo.username in params.spec.gitopsServiceAccounts))
+        || (variables.humanMarker && has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups))
   validations:
     - expression: "!(variables.newLabelCritical && !variables.oldLabelCritical) || variables.isTrusted"
       reason: Forbidden

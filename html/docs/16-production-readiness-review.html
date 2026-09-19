@@ -445,6 +445,18 @@
 <td>ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted</td>
 </tr>
 <tr>
+<td><strong>Impersonation dry-run only</strong> (write denied, dry-run allowed, access review allowed, impersonated approver/break-glass not honoured, userextras unforgeable)</td>
+<td>§10</td>
+<td>T12b</td>
+<td>ImpersonatedWriteDenied</td>
+</tr>
+<tr>
+<td>Humans and break-glass hold <code>guardrails-platform-admin</code>, not <code>cluster-admin</code>; no custom role grants impersonate on userextras</td>
+<td>verify</td>
+<td>docs/17 §Verification</td>
+<td>–</td>
+</tr>
+<tr>
 <td>kubeadmin / system:admin write</td>
 <td>–</td>
 <td>B1 (kubeadmin removed; verify)</td>
@@ -520,9 +532,9 @@
 <h2>4. What &quot;production-grade&quot; means here, and what remains</h2>
 <p>Met: least-privilege RBAC with explicit tiers; fail-closed enforcement in kube-apiserver with self-protection from phase 1; independent detection pipelines with health alerts on the alerting itself; reproducible, phase-aware tests with retained evidence; documented and rehearsed break-glass; backups with encryption at rest; Git as the single source of truth under a no-bypass ruleset; every claim in the documents traceable to a manifest and a test.</p>
 <p>Still to observe on your cluster (cannot be proven locally): R3 (does VAP evaluate deletes of its own bindings on your build), R6 (Loki field names after Logging upgrades), the CEL compile on the API server (first <code>--dry-run=server</code> in Part C1), and the real latency of alert delivery (T9.2).</p>
-<p>Accepted residual risks: R1 (impersonation of exempt identities by a JIT cluster-admin: alerted, provable), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).</p>
+<p>Accepted residual risks: R1 is now closed for human roles by docs/17 (impersonation restricted to reads, access reviews and dry-runs; only the vaulted <code>system:masters</code> certificate can still forge identities), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).</p>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a></p>
 </main>
 <footer>Generated from <code>docs/16-production-readiness-review.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

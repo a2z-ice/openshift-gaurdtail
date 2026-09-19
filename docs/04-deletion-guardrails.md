@@ -54,6 +54,8 @@ Design notes:
 
 ## Companion policies
 
+- `guardrails-impersonation-dry-run-only` – any CREATE/UPDATE/DELETE by an identity that lacks its authentication marker (humans: `scopes.authorization.openshift.io`; privileged SAs: `authentication.kubernetes.io/credential-id`) is denied unless `--dry-run=server`. Combined with RBAC that grants nobody `impersonate` on `userextras`, this makes `--as` a read/dry-run tool only. The deletion policy's own `isExempt`, `isGitOps`, `isReaper`, `isApprover` and `isRequester` variables require the same markers, so an impersonated exempt identity or approver is treated as an ordinary user even in a dry-run. Design: docs/17.
+
 - `guardrails-critical-label-control` – only `gitopsServiceAccounts`, `exemptUsers` or approver-group members may **add** the critical label (CREATE or UPDATE). Without it any tenant with `patch` on a protected kind could mark their own object critical to force the platform team into the workflow or wedge their namespace in Terminating. Bound with the same label `objectSelector`; follows the phase actions.
 
 - `guardrails-gitops-only-mutation` – critical objects may only be *changed* by the Argo CD identities (application-controller, server, applicationset-controller, the GitOps operator), the reaper (annotations only) or break-glass; a human editing the `ArgoCD` CR or the forwarder by hand is flagged (`ArgoCDDirectMutation`) in phases 1–3 and denied in phase 4. The approval workflow is explicitly allowed (only guardrail annotations change).

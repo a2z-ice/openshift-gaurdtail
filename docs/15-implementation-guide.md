@@ -45,7 +45,7 @@ Record the outcome in the change ticket that will carry the whole rollout.
 | Requesters/executors | 2 | `gitops-deletion-requesters` |
 | Argo CD day-2 operators | as needed | `gitops-operators` |
 | Auditors | 1 | `auditors` |
-| JIT cluster-admins | as needed, **empty at rest** | `platform-admins` |
+| JIT platform admins | as needed, **empty at rest** | `platform-admins` (bound to `guardrails-platform-admin` + `guardrails-impersonator`, not `cluster-admin`; docs/17) |
 | Break-glass custodians | 2, different teams | `breakglass-custodians` (may mint the token) |
 | GitHub code owners | ≥ 3 each in `@example-org/platform-engineering` and `@example-org/security` | CODEOWNERS |
 

@@ -20,5 +20,6 @@ description: Respond to a guardrail alert (CriticalResourceDeleted, GitOpsResour
    - `CriticalResourceDeleteDenied`: no damage; identify who/why (often Argo CD after a manifest was removed from Git → review the PR).
    - `AuditLogIngestionStalled` / `LokiRulerDown`: check forwarder/LokiStack conditions and pods in `openshift-logging`; detection is blind meanwhile, watch the SIEM directly.
    - `PrivilegedRBACChange`: match to an access-request ticket or revert via PR.
+   - `ImpersonatedWriteDenied` / `PrivilegedIdentityImpersonated`: a non-dry-run write under `--as`; revoke the actor's OAuth tokens, remove JIT membership, incident (`docs/17`).
 4. **Verify** with `scripts/verify-install.sh`.
 5. **Post-mortem** within 5 working days using the template in `docs/09-runbooks.md`; update `docs/01` residual-risk register and `llm/memory.md`.

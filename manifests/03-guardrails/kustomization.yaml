@@ -6,6 +6,7 @@ resources:
   - vap-critical-delete.yaml
   - vap-critical-delete-bindings.yaml
   - vap-critical-label-control.yaml
+  - vap-impersonation-dry-run-only.yaml
   - vap-gitops-only-mutation.yaml
   - vap-rbac-escalation-audit.yaml
   - reaper-cronjob.yaml

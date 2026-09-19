@@ -40,6 +40,7 @@ rules:
       - guardrails-gitops-only-mutation
       - guardrails-gitops-only-mutation-hardened
       - guardrails-rbac-escalation-audit
+      - guardrails-impersonation-dry-run-only
     verbs: ["get", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
@@ -51,6 +52,9 @@ rules:
       - guardrails-approvers
       - guardrails-executors
       - guardrails-platform-admins
+      - guardrails-platform-admin
+      - guardrails-impersonator
+      - guardrails-impersonators
       - guardrails-breakglass
       - guardrails-approval-reaper
       - guardrails-auditors-view
@@ -94,6 +98,7 @@ rules:
       - guardrails-gitops-only-mutation
       - guardrails-gitops-only-mutation-hardened
       - guardrails-rbac-escalation-audit
+      - guardrails-impersonation-dry-run-only
     verbs: ["get", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
@@ -105,6 +110,9 @@ rules:
       - guardrails-approvers
       - guardrails-executors
       - guardrails-platform-admins
+      - guardrails-platform-admin
+      - guardrails-impersonator
+      - guardrails-impersonators
       - guardrails-breakglass
       - guardrails-approval-reaper
       - guardrails-auditors-view
@@ -243,8 +251,9 @@ subjects:
   - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: auditors }
   - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
 ---
-# Time-boxed cluster-admin. The group is EMPTY at rest; the IdP (Entra PIM / Okta / LDAP JIT) adds a
-# person for a bounded window. This is the ONLY cluster-admin binding for humans.
+# Time-boxed platform administration. The group is EMPTY at rest; the IdP (Entra PIM / Okta / LDAP JIT)
+# adds a person for a bounded window. Bound to guardrails-platform-admin (everything except impersonate,
+# escalate, bind; see platform-admin.yaml), NOT to cluster-admin: no human holds impersonate on userextras.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -255,6 +264,6 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: cluster-admin
+  name: guardrails-platform-admin
 subjects:
   - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: platform-admins }

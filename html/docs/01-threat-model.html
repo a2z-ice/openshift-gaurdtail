@@ -73,9 +73,9 @@
 </tr>
 <tr>
 <td>S4</td>
-<td>Compromised or malicious cluster-admin tries to delete / cripple Argo CD</td>
+<td>Compromised or malicious platform admin tries to delete / cripple Argo CD</td>
 <td>low, high impact</td>
-<td>VAP applies to <code>system:masters</code> (L3); forging approvals or impersonating the exempt Argo CD controller / break-glass → <code>ImpersonationUsed</code> / <code>PrivilegedIdentityImpersonated</code> P1, minting their tokens → <code>PrivilegedTokenMinted</code> P1 (L6); no standing cluster-admin for humans (L1)</td>
+<td>VAP applies to every identity (L3); impersonating an approver, break-glass or the Argo CD controller no longer works for writes (docs/17, L1+L3); minting their tokens → <code>PrivilegedTokenMinted</code> P1 (L6); no standing admin membership for humans (L1)</td>
 </tr>
 <tr>
 <td>S5</td>
@@ -184,9 +184,9 @@
 </thead>
 <tbody><tr>
 <td>R1</td>
-<td>cluster-admin impersonates an approver (forged approval), the exempt break-glass SA or an Argo CD controller (one-command bypass), or mints their tokens</td>
+<td>Impersonation of an approver, break-glass or an Argo CD controller</td>
 <td>Security</td>
-<td><code>ImpersonationUsed</code>, <code>PrivilegedIdentityImpersonated</code>, <code>PrivilegedTokenMinted</code> P1; JIT cluster-admin is a hard prerequisite; audit shows both identities so it is provable</td>
+<td><strong>Closed for every human role</strong> (docs/17): no human holds <code>cluster-admin</code>; <code>impersonate</code> is granted on users/groups/serviceaccounts only (never <code>userextras</code>); exemptions and approver status require the authentication markers a real session carries; non-dry-run impersonated writes are denied (<code>guardrails-impersonation-dry-run-only</code>) and alerted (<code>ImpersonatedWriteDenied</code>). Remaining: the <code>system:masters</code> installer certificate (vaulted, alerted) and token minting for privileged SAs (<code>PrivilegedTokenMinted</code>, custodian Role)</td>
 <td>quarterly</td>
 </tr>
 <tr>
@@ -240,7 +240,7 @@
 </tr>
 </tbody></table>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a></p>
 </main>
 <footer>Generated from <code>docs/01-threat-model.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

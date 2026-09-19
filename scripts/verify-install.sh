@@ -9,14 +9,14 @@ check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "
 
 echo "== Guardrail objects"
 check "GuardrailConfig default exists"           oc get guardrailconfig default
-for p in guardrails-critical-delete guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-rbac-escalation-audit; do
+for p in guardrails-critical-delete guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-rbac-escalation-audit guardrails-impersonation-dry-run-only; do
   check "ValidatingAdmissionPolicy $p"            oc get validatingadmissionpolicy "$p"
   W="$(oc get validatingadmissionpolicy "$p" -o jsonpath='{.status.typeChecking.expressionWarnings[*].warning}' 2>/dev/null | wc -w)"
   [[ "$W" -gt 0 ]] && warn "$p has $W type-checking warning words (expected for multi-kind policies; confirm no 'compilation' errors: oc get vap $p -o yaml | grep -i error)"
   E="$(oc get validatingadmissionpolicy "$p" -o json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=[x for x in d.get("status",{}).get("conditions",[]) if x.get("status")=="False"]; print(len(c))' 2>/dev/null || echo 0)"
   [[ "$E" == "0" ]] || bad "$p has $E False status condition(s): oc get vap $p -o jsonpath='{.status.conditions}'"
 done
-for b in guardrails-critical-delete-labelled guardrails-critical-delete-named guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-gitops-only-mutation-hardened guardrails-rbac-escalation-audit; do
+for b in guardrails-critical-delete-labelled guardrails-critical-delete-named guardrails-critical-label-control guardrails-gitops-only-mutation guardrails-gitops-only-mutation-hardened guardrails-rbac-escalation-audit guardrails-impersonation-dry-run-only; do
   check "Binding $b" oc get validatingadmissionpolicybinding "$b"
   echo "       actions: $(oc get validatingadmissionpolicybinding "$b" -o jsonpath='{.spec.validationActions}' 2>/dev/null)"
 done
@@ -27,6 +27,10 @@ echo "== Identity"
 if oc get secret kubeadmin -n kube-system >/dev/null 2>&1; then bad "kubeadmin secret still present (remove after IdP is verified)"; else ok "kubeadmin removed"; fi
 N="$(oc get clusterrolebinding -o json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for b in d["items"] if b["roleRef"]["name"]=="cluster-admin" for s in b.get("subjects",[]) if s["kind"]=="User"))' 2>/dev/null || echo "?")"
 [[ "$N" == "0" ]] && ok "no User subjects bound directly to cluster-admin" || warn "$N User subject(s) bound directly to cluster-admin"
+CA="$(oc get clusterrolebinding -o json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(",".join(b["metadata"]["name"] for b in d["items"] if b["roleRef"]["name"]=="cluster-admin" and any(s.get("kind")=="Group" and s["name"] not in ("system:masters",) for s in b.get("subjects",[]))))' 2>/dev/null)"
+[[ -z "$CA" ]] && ok "no Group other than system:masters bound to cluster-admin (impersonation control intact)" || bad "cluster-admin bound to groups: $CA (platform-admins must use guardrails-platform-admin)"
+UX="$(oc get clusterrole -o json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(",".join(r["metadata"]["name"] for r in d["items"] if r["metadata"]["name"] not in ("cluster-admin",) and any("impersonate" in (x.get("verbs") or []) and ("userextras" in (x.get("resources") or []) or "*" in (x.get("resources") or []) or "*" in (x.get("verbs") or [])) for x in (r.get("rules") or []))))' 2>/dev/null)"
+[[ -z "$UX" ]] && ok "no custom ClusterRole grants impersonate on userextras" || warn "ClusterRoles able to forge userextras: $UX (check who is bound)"
 for g in gitops-deletion-approvers gitops-deletion-requesters platform-admins; do check "Group $g" oc get group "$g"; done
 A="$(oc get group gitops-deletion-approvers -o jsonpath='{.users[*]}' 2>/dev/null | wc -w | tr -d ' ')"
 [[ "$A" -ge 4 ]] && ok "approver group has $A members" || warn "approver group has only $A member(s); need >= 4 for the two-person rule to be workable"

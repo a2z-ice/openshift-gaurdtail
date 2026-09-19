@@ -515,6 +515,29 @@ $ as-admin --as=a1@example.com --as-group=gitops-deletion-approvers -n $NS annot
 ```
 → Teams/email (security): 🔴 `ImpersonationUsed`: `admin@example.com impersonated a1@example.com for a write (patch configmaps)` within ~1 min. Audit tail shows `imp=a1@example.com`. This is the proof that a forged approval is always attributable.
 
+## 12b. Impersonation is dry-run only ★ (docs/17)
+
+As a JIT admin (`platform-admins`, bound to `guardrails-platform-admin` + `guardrails-impersonator`):
+```bash
+$ as-admin auth can-i impersonate userextras
+→ no
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b
+→ Error from server (Forbidden): configmaps "imp" is forbidden: ValidatingAdmissionPolicy 'guardrails-impersonation-dry-run-only' with binding 'guardrails-impersonation-dry-run-only' denied request: GUARDRAIL DENIED: dev@example.com has no authentication marker (scopes.authorization.openshift.io), so this session is impersonated or uses a legacy token. Impersonation may only be used with --dry-run=server or for reads ...
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b --dry-run=server
+→ configmap/imp created (server dry run)
+$ as-admin --as=dev@example.com -n $NS create configmap imp --from-literal=a=b --dry-run=client
+→ configmap/imp created (dry run)                       (never reaches the server)
+$ as-admin --as=dev@example.com auth can-i create configmaps -n $NS
+→ yes                                                    (access reviews are exempt from the policy)
+$ as-admin --as=a1@example.com --as-group=gitops-deletion-approvers -n $NS annotate configmap victim2 --overwrite "$PFX/delete-approvals=a1@example.com|$(ts)" --dry-run=server
+→ Error from server (Forbidden): ... 'guardrails-critical-delete' ... invalid change to guardrails.example.com/delete-approvals by a1@example.com ...   (no marker → not an approver, even in dry-run)
+$ as-admin --as=system:serviceaccount:guardrails-system:breakglass -n openshift-gitops delete argocd openshift-gitops --dry-run=server
+→ Error from server (Forbidden): ... 'guardrails-critical-delete' ... GUARDRAIL DENIED: deleting critical argocds ...   (impersonated break-glass is not exempt)
+$ as-admin --as=dev@example.com --as-user-extra=scopes.authorization.openshift.io=user:full -n $NS create configmap imp --from-literal=a=b
+→ Error from server (Forbidden): userextras.authentication.k8s.io "scopes.authorization.openshift.io" is forbidden: User "admin@example.com" cannot impersonate resource "userextras/scopes.authorization.openshift.io" ...   (markers cannot be forged)
+```
+Teams/email (security): 🔴 `ImpersonatedWriteDenied` for the first attempt; no alert for the dry-runs or the access review.
+
 ## 13. Break-glass
 
 Two custodians (`breakglass-custodians`), an incident ticket, pre-prod.
@@ -587,6 +610,7 @@ The namespace stays `Terminating` because the namespace controller's deletes of 
 | T10.1 | ingestion stalled | metrics alert | | | | |
 | T11 | repo controls | ruleset + CI | | | | |
 | T12 | impersonation | alert | | | | |
+| T12b | impersonation dry-run only | writes denied, dry-run/can-i allowed, markers unforgeable | | | | |
 | T13 | break-glass | non-custodian cannot mint; custodian mint paged; use paged | | | | |
 | T14 | privileged RBAC | warning + alert | | | | |
 | T15 | phase-2 warning | warning + success | | | | |

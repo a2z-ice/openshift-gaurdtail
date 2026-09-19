@@ -105,6 +105,10 @@ Symptoms: `ArgoCDApplicationControllerMissing`, `ArgoCDServerMissing`, `GitOpsNa
 6. Verify: `scripts/verify-install.sh`; `argocd app list` shows all apps Synced/Healthy; `oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server` denied.
 7. Expected RTO: 10 min (instance only) – 30 min (operator + instance).
 
+## Impersonated write denied
+
+`ImpersonatedWriteDenied`: someone ran a write with `--as` and without `--dry-run=server`. The audit event names the real user (`user.username`) and the assumed identity (`impersonatedUser.username`). Legitimate testing uses dry-run; a real write attempt is a bypass attempt: revoke the actor's tokens (`oc delete oauthaccesstokens --field-selector=userName=<user>`), remove JIT membership at the IdP, open an incident. Details: docs/17.
+
 ## Git-driven deletion
 
 `GitOpsCriticalDeletionApplied` fired. Find the PR: `git log --oneline -S '<object name>' -- manifests/` (or the application repository). If a merged PR removed the object: expected, link it in the alert thread. If not: incident (see Respond to a red alert, classification `gitops=true` without PR).

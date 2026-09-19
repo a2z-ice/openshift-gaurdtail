@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17-impersonation-control · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>17 · Impersonation control: check with <code>--as</code>, never change with it</h1>
+<h2>Why</h2>
+<p>Kubernetes impersonation (<code>oc --as=&lt;user&gt; --as-group=&lt;group&gt;</code>, the <code>Impersonate-*</code> headers) is the one path that turns every cluster-side control in this repository into a single-person action: a <code>cluster-admin</code> can become an approver and forge an approval, or become the break-glass service account or the Argo CD controller and be exempt. Admission cannot see the impersonation headers; it sees only the resulting identity. The audit log records both identities, so the abuse is provable, but until now it was not <em>preventable</em>. Residual risk R1 said as much.</p>
+<p>The requirement is precise: <strong>impersonation may be used only for dry-runs, client-side and server-side.</strong> A client-side dry-run (<code>--dry-run=client</code>) never sends a write to the API server, so it is inherently unaffected. A server-side dry-run (<code>--dry-run=server</code>) goes through admission but is never persisted. Every other write made under an impersonated identity must be denied. Reads and access reviews (<code>oc auth can-i --as</code>) remain possible: they change nothing and are the legitimate reason impersonation exists.</p>
+<h2>How admission can tell a real session from an impersonated one</h2>
+<p>The API server does not pass &quot;this request is impersonated&quot; to admission. What it does pass is <code>request.userInfo.extra</code>, and a real session carries authentication extras that an impersonated session does not:</p>
+<table>
+<thead>
+<tr>
+<th>Session type</th>
+<th>Extra present on a real session</th>
+<th>Present on an impersonated copy?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Human logged in through OpenShift OAuth (any IdP)</td>
+<td><code>scopes.authorization.openshift.io</code> (e.g. <code>user:full</code>)</td>
+<td>No, unless the impersonator is allowed to impersonate <code>userextras</code></td>
+</tr>
+<tr>
+<td>Service account using a bound token (every pod&#39;s projected token, <code>oc create token</code>)</td>
+<td><code>authentication.kubernetes.io/credential-id</code> (<code>JTI=&lt;uuid&gt;</code>; GA since Kubernetes 1.32, so on every OCP 4.21 cluster)</td>
+<td>No, unless the impersonator is allowed to impersonate <code>userextras</code></td>
+</tr>
+<tr>
+<td>Client-certificate user (<code>system:admin</code>)</td>
+<td>none</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>Service account using a legacy secret-based token</td>
+<td>none</td>
+<td>n/a</td>
+</tr>
+</tbody></table>
+<p>So the design has two halves that only work together:</p>
+<ol>
+<li><strong>RBAC: nobody may impersonate <code>userextras</code>.</strong> <code>cluster-admin</code> (<code>*</code> on <code>*</code>) can, so humans no longer get <code>cluster-admin</code>. They get <code>guardrails-platform-admin</code> (every verb on every resource except <code>impersonate</code>, <code>escalate</code>, <code>bind</code>) plus <code>guardrails-impersonator</code> (<code>impersonate</code> on <code>users</code>, <code>groups</code>, <code>serviceaccounts</code> only). Without <code>escalate</code>/<code>bind</code> they cannot grant themselves the missing verbs; without <code>impersonate</code> on <code>userextras</code> they cannot forge the markers. The break-glass service account is bound to <code>guardrails-platform-admin</code> as well: it needs no impersonation.</li>
+<li><strong>Admission: a write without the marker is impersonated, and impersonated writes are dry-run only.</strong> <code>guardrails-impersonation-dry-run-only</code> denies any non-dry-run CREATE/UPDATE/DELETE where a human identity lacks <code>humanAuthExtraKey</code> or a privileged service-account identity lacks the bound-token credential-id. In addition, every other guardrail policy now honours exemptions and approver status <strong>only when the marker is present</strong>: an impersonated break-glass is not exempt even in a dry-run, an impersonated approver cannot approve even in a dry-run. Dry-runs therefore show exactly what a real, non-impersonated session would get.</li>
+</ol>
+<p>What remains: the group <code>system:masters</code> (the installer&#39;s <code>system:admin</code> certificate) bypasses RBAC entirely and can forge extras. That credential stays in the vault under dual control (docs/03), and any use is alerted (<code>KubeadminOrSystemAdminUsed</code>).</p>
+<h2>Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>manifests/02-rbac/platform-admin.yaml</code></td>
+<td>ClusterRoles <code>guardrails-platform-admin</code> and <code>guardrails-impersonator</code>; binding of the impersonator role to <code>platform-admins</code></td>
+</tr>
+<tr>
+<td><code>manifests/02-rbac/clusterroles.yaml</code></td>
+<td><code>guardrails-platform-admins</code> now binds <code>guardrails-platform-admin</code> instead of <code>cluster-admin</code></td>
+</tr>
+<tr>
+<td><code>manifests/02-rbac/breakglass.yaml</code></td>
+<td>break-glass bound to <code>guardrails-platform-admin</code></td>
+</tr>
+<tr>
+<td><code>manifests/03-guardrails/vap-impersonation-dry-run-only.yaml</code></td>
+<td>the policy and its binding (phase-controlled)</td>
+</tr>
+<tr>
+<td><code>manifests/03-guardrails/crd-guardrailconfig.yaml</code>, <code>guardrailconfig-default.yaml</code></td>
+<td><code>humanAuthExtraKey</code> (default <code>scopes.authorization.openshift.io</code>), <code>requireBoundTokenForPrivileged</code> (default <code>true</code>)</td>
+</tr>
+<tr>
+<td><code>vap-critical-delete.yaml</code>, <code>vap-critical-label-control.yaml</code>, <code>vap-gitops-only-mutation.yaml</code></td>
+<td><code>isExempt</code>, <code>isGitOps</code>, <code>isReaper</code>, <code>isOlmCsvReplacement</code>, <code>isTrusted*</code> require the bound-token marker; <code>isApprover</code>, <code>isRequester</code> require the human marker</td>
+</tr>
+<tr>
+<td><code>manifests/05-alerting/loki-alertingrules-audit.yaml</code></td>
+<td><code>ImpersonatedWriteDenied</code> (critical, security)</td>
+</tr>
+<tr>
+<td><code>manifests/overlays/phase1-audit</code>, <code>phase2-warn</code></td>
+<td>the new binding is <code>[Audit]</code> / <code>[Warn, Audit]</code> like the deletion bindings</td>
+</tr>
+</tbody></table>
+<h2>The policy, line by line</h2>
+<pre><code class="language-yaml">matchConstraints: every CREATE/UPDATE/DELETE of every resource in every group
+matchConditions:
+  not-an-access-review    : groups authorization.k8s.io, authorization.openshift.io, authentication.k8s.io are skipped
+                            (oc auth can-i --as creates a SubjectAccessReview; it must keep working)
+  not-a-system-component  : identities starting with system: are skipped, except system:serviceaccount:*
+variables:
+  isServiceAccount  username starts with system:serviceaccount:
+  hasBoundToken     &#39;authentication.kubernetes.io/credential-id&#39; in userInfo.extra
+  hasHumanMarker    humanAuthExtraKey == &#39;&#39; || humanAuthExtraKey in userInfo.extra
+  isPrivilegedSA    isServiceAccount &amp;&amp; username in exemptUsers ∪ gitopsControllers ∪ gitopsServiceAccounts ∪ reaperUsers ∪ olmServiceAccounts
+  impersonated      (isPrivilegedSA &amp;&amp; requireBoundTokenForPrivileged &amp;&amp; !hasBoundToken) || (!isServiceAccount &amp;&amp; !hasHumanMarker)
+  dryRun            has(request.dryRun) &amp;&amp; request.dryRun
+validation:         dryRun || !impersonated
+auditAnnotation:    impersonated-write = &quot;user=… op=… resource=… name=… dryRun=…&quot;  (on every impersonated write, allowed or denied)
+</code></pre>
+<p>Why only <em>privileged</em> service accounts are checked: a tenant workload might still use a legacy secret-based token (no credential-id). Denying its writes would be an outage with no security benefit, since impersonating an unprivileged SA gains nothing against critical objects. The privileged identities all run as pods with projected bound tokens, or are minted with <code>oc create token</code>, so the marker is always present for them.</p>
+<h2>Behaviour matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Action under <code>--as</code></th>
+<th>Before</th>
+<th>Now</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>oc get</code>, <code>oc describe</code> (reads)</td>
+<td>allowed</td>
+<td>allowed (not admission-reviewed; harmless)</td>
+</tr>
+<tr>
+<td><code>oc auth can-i --as</code></td>
+<td>allowed, but raised <code>ImpersonationUsed</code></td>
+<td>allowed, excluded from the alert</td>
+</tr>
+<tr>
+<td><code>oc create/apply/patch/delete --dry-run=client</code></td>
+<td>no request sent</td>
+<td>no request sent</td>
+</tr>
+<tr>
+<td><code>oc create/apply/patch/delete --dry-run=server</code></td>
+<td>allowed</td>
+<td>allowed; exemptions and approver status are <strong>not</strong> honoured for the impersonated identity, so the result reflects an ordinary user</td>
+</tr>
+<tr>
+<td><code>oc annotate</code> an approval as an approver</td>
+<td>accepted (forged approval)</td>
+<td><strong>denied</strong> by <code>guardrails-impersonation-dry-run-only</code>; also V3 denies because <code>isApprover</code> is false</td>
+</tr>
+<tr>
+<td><code>oc delete</code> a critical object as break-glass / Argo CD controller</td>
+<td>accepted (bypass)</td>
+<td><strong>denied</strong>: not exempt without the marker, and the write is impersonated</td>
+</tr>
+<tr>
+<td>Any other write (create a Deployment, patch a ConfigMap)</td>
+<td>accepted</td>
+<td><strong>denied</strong> unless dry-run</td>
+</tr>
+<tr>
+<td>Same actions with <code>--as-user-extra scopes.authorization.openshift.io=user:full</code></td>
+<td>n/a</td>
+<td>RBAC <strong>forbidden</strong> for every human role (<code>impersonate</code> on <code>userextras</code> is granted to nobody); only <code>system:masters</code> can</td>
+</tr>
+</tbody></table>
+<h2>Corner cases</h2>
+<table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Behaviour</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>External OIDC authentication (OCP 4.15+ direct OIDC, hosted control planes) instead of OpenShift OAuth</td>
+<td>human sessions may carry no <code>scopes.authorization.openshift.io</code> extra → every human write denied</td>
+<td>set <code>humanAuthExtraKey</code> to an extra your OIDC configuration populates, or <code>&quot;&quot;</code> to disable the human marker (the SA marker keeps protecting privileged identities and exemptions)</td>
+</tr>
+<tr>
+<td>Client-certificate human users (custom kubeconfigs, <code>oc adm create-kubeconfig</code>)</td>
+<td>no extras → writes denied</td>
+<td>do not issue certificate identities to humans; use the IdP</td>
+</tr>
+<tr>
+<td><code>kube:admin</code> (kubeadmin)</td>
+<td>OAuth session → has the marker</td>
+<td>remove kubeadmin anyway (docs/03)</td>
+</tr>
+<tr>
+<td><code>system:admin</code> (installer certificate)</td>
+<td>skipped by the <code>system:</code> condition; can forge extras</td>
+<td>vaulted; alerted</td>
+</tr>
+<tr>
+<td>Legacy secret-based SA token used by a <em>privileged</em> identity (e.g. someone created a <code>kubernetes.io/service-account-token</code> Secret for the reaper)</td>
+<td>treated as impersonated → denied</td>
+<td>never create such secrets for the guardrail identities; use projected tokens or <code>oc create token</code></td>
+</tr>
+<tr>
+<td>CI systems using SA tokens</td>
+<td>unprivileged SAs are not checked</td>
+<td>none</td>
+</tr>
+<tr>
+<td>A JIT admin needs to test &quot;what would alice see&quot;</td>
+<td><code>oc auth can-i --as=alice ...</code> and <code>--dry-run=server --as=alice</code> both work</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>scripts/test-guardrails.sh</code> in impersonation mode</td>
+<td>it forges the markers with <code>--as-user-extra</code>, which only a <code>system:masters</code> credential may do</td>
+<td>run impersonation mode on pre-prod with the installer kubeconfig, or use <code>IMPERSONATE=false</code> with real logins (the sign-off mode)</td>
+</tr>
+<tr>
+<td>Argo CD <code>argocd-server</code> acting for a UI user</td>
+<td>real bound token → has the marker; it is a trusted mutator, never exempt</td>
+<td>none</td>
+</tr>
+<tr>
+<td>Reaper, OLM, GitOps controllers</td>
+<td>pods with projected tokens → marker present</td>
+<td>none</td>
+</tr>
+<tr>
+<td>Someone with <code>guardrails-platform-admin</code> creates a ClusterRole granting <code>impersonate</code> on <code>userextras</code></td>
+<td>RBAC escalation check denies: they do not hold that permission and have no <code>escalate</code> verb</td>
+<td><code>PrivilegedRBACChange</code> alerts on the attempt</td>
+</tr>
+<tr>
+<td>Phase 1/2</td>
+<td>the binding is Audit/Warn: impersonated writes succeed and are annotated; <code>ImpersonatedWriteDenied</code> does not fire (no 4xx) but the <code>impersonated-write</code> audit annotation is present</td>
+<td>observe for a week like the other bindings</td>
+</tr>
+</tbody></table>
+<h2>Rollout</h2>
+<p>The binding follows the deletion bindings&#39; phase schedule (Audit → Warn → Deny). Prerequisite for phase 3: every human on the cluster authenticates through OpenShift OAuth (or <code>humanAuthExtraKey</code> is adjusted), and the RBAC change (platform-admins off <code>cluster-admin</code>) has been applied and rehearsed: JIT admins must confirm that <code>oc adm</code>, <code>oc debug node</code>, operator installs and <code>oc adm must-gather</code> still work with <code>guardrails-platform-admin</code> (they do; the role holds every verb except the three identity-escalation verbs).</p>
+<h2>Verification</h2>
+<pre><code class="language-bash"># RBAC
+oc auth can-i impersonate userextras --as=admin@example.com --as-group=platform-admins      # no
+oc auth can-i impersonate users      --as=admin@example.com --as-group=platform-admins      # yes
+oc get clusterrolebinding -o json | jq -r &#39;.items[] | select(.roleRef.name==&quot;cluster-admin&quot;) | .subjects[]?.name&#39;   # only system:masters
+# markers on a real session
+oc get --raw /apis/authentication.k8s.io/v1/selfsubjectreviews -X POST -H &#39;Content-Type: application/json&#39; -d &#39;{&quot;apiVersion&quot;:&quot;authentication.k8s.io/v1&quot;,&quot;kind&quot;:&quot;SelfSubjectReview&quot;}&#39; | jq .status.userInfo.extra
+# policy (phase 3), as a JIT admin
+oc --as=dev@example.com -n guardrails-test create configmap x --from-literal=a=b
+→ Error from server (Forbidden): ... &#39;guardrails-impersonation-dry-run-only&#39; ... GUARDRAIL DENIED: dev@example.com has no authentication marker ... Impersonation may only be used with --dry-run=server or for reads ...
+oc --as=dev@example.com -n guardrails-test create configmap x --from-literal=a=b --dry-run=server
+→ configmap/x created (server dry run)
+oc --as=dev@example.com auth can-i create configmaps -n guardrails-test
+→ yes/no (works)
+oc --as=system:serviceaccount:guardrails-system:breakglass -n openshift-gitops delete argocd openshift-gitops --dry-run=server
+→ Error from server (Forbidden): ... &#39;guardrails-critical-delete&#39; ... (not exempt without a bound token)
+</code></pre>
+<p>Automated: <code>scripts/test-guardrails.sh</code> §10. Manual: <code>docs/14</code> T17. Alert: <code>ImpersonatedWriteDenied</code> in Teams (security).</p>
+<h2>Respond</h2>
+<p><code>ImpersonatedWriteDenied</code> or <code>PrivilegedIdentityImpersonated</code>: the audit event names both identities (<code>user</code>, <code>impersonatedUser</code>). Treat a non-dry-run attempt as a bypass attempt: revoke the actor&#39;s OAuth tokens (<code>oc delete oauthaccesstokens --field-selector=userName=&lt;user&gt;</code>), remove JIT membership at the IdP, open an incident. A dry-run under impersonation is normal testing and is not alerted.</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a></p>
+</main>
+<footer>Generated from <code>docs/17-impersonation-control.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

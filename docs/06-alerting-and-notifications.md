@@ -19,6 +19,7 @@ Each covers the other's failure mode: stop the forwarder and `AuditLogIngestionS
 | `ArgoCDCredentialSecretDeleted` | audit | critical | email + Teams | a Secret in openshift-gitops was deleted by a non-system identity (Tier B: only JIT admin or break-glass can) |
 | `PrivilegedIdentityImpersonated` | audit | critical | security | someone impersonated break-glass or an Argo CD controller (the one-command bypass) |
 | `PrivilegedTokenMinted` | audit | critical | security | a token was minted for break-glass, the reaper or an Argo CD SA |
+| `ImpersonatedWriteDenied` | audit | critical | security | a non-dry-run write under impersonation was blocked (docs/17) |
 | `GitOpsResourceDeleted` | audit | critical | email + Teams | name-based fallback for GitOps namespaces/kinds, independent of the policy |
 | `CriticalResourceDeleteDenied` | audit | warning | Teams | blocked attempt; who and what |
 | `CriticalDeletionApprovalRecorded` | audit | info | Teams (batched) | request/approval activity; expected during a planned deletion |

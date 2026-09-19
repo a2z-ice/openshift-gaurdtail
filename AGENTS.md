@@ -12,7 +12,7 @@ audit trail (API-server audit → SIEM + Loki), a **two-person rule for out-of-b
 ## Hard rules for assistants
 
 1. **Never weaken the guardrail silently.** Do not add humans to `exemptUsers` or `gitopsControllers`, never put `argocd-server` in `gitopsControllers`, lower `minApprovers` below 2, set `executorMayBeApprover: true`, remove `Deny` from a phase-3/4 binding or from the `-hardened` binding, or add `resources-finalizer.argocd.argoproj.io` to `manifests/04-argocd/application-guardrails.yaml`. If asked, explain the consequence and require an explicit, written decision; CI (`.github/workflows/policy-ci.yaml`) blocks these anyway.
-2. **Never bypass the workflow.** An out-of-band critical deletion is `request → approve ×2 → execute` by three different humans (`scripts/*.sh`); a Git-managed object is deleted by a PR instead. Tier-B kinds (namespaces, CRDs, OLM objects, secrets, serviceaccounts) are break-glass only when not Git-managed. Do not suggest `--as` impersonation, `kubeadmin`, `system:admin`, the break-glass token, patching finalizers, or editing `validationActions` to get a deletion through. Those are P1 security alerts by design.
+2. **Never bypass the workflow.** An out-of-band critical deletion is `request → approve ×2 → execute` by three different humans (`scripts/*.sh`); a Git-managed object is deleted by a PR instead. Tier-B kinds (namespaces, CRDs, OLM objects, secrets, serviceaccounts) are break-glass only when not Git-managed. Do not suggest `--as` impersonation, `kubeadmin`, `system:admin`, the break-glass token, patching finalizers, or editing `validationActions` to get a deletion through. Those are P1 security alerts by design, and impersonated writes are denied unless `--dry-run=server` (`guardrails-impersonation-dry-run-only`).
 3. **No secrets in Git.** SMTP password, Teams webhook URL (`sig=`), Loki S3 keys, Splunk HEC token, OADP credentials stay `REPLACE_*` placeholders; real values come from the vault.
 4. **Every manifest change is a PR** with two approvals (ruleset has no bypass). Do not `oc apply` manifests to a cluster by hand except the phase-1 bootstrap or a documented break-glass.
 5. **Validate before proposing**: `kustomize build` for base + all overlays, `yamllint -c .yamllint manifests`, `bash -n scripts/*.sh`. Keep `docs/04` rule numbering (V1–V4) in sync with `manifests/03-guardrails/vap-critical-delete.yaml`.
@@ -31,10 +31,11 @@ audit trail (API-server audit → SIEM + Loki), a **two-person rule for out-of-b
 | Trusted mutators (update only, not exempt from deletion) | `gitopsServiceAccounts`: `openshift-gitops-argocd-server` (UI/CLI), `openshift-gitops-operator-controller-manager`; add ESO/Velero/ldap-sync as observed. Only gitopsControllers, trusted mutators, break-glass and approvers may **add** the critical label |
 | RBAC tiers | Tier A (workflow: Argo CD CRs, GuardrailConfig, policies, guardrails-* RBAC, groups, APIServer/OAuth, logging/alerting/backup CRs, named CronJobs/ConfigMaps) via `resourceNames` + namespaced RoleBindings. Tier B (namespaces, CRDs, OLM objects, Secrets, ServiceAccounts): no human patch/delete; Git or break-glass only |
 | Self-protection set | GuardrailConfig, policies/bindings, guardrails-* RBAC, privileged Groups, APIServer/OAuth, labelled CronJobs: GitOps-only (`-hardened` binding, Deny in every phase); humans may only add approval annotations |
-| Groups | `platform-admins` (JIT cluster-admin), `gitops-deletion-approvers`, `gitops-deletion-requesters`, `gitops-operators`, `auditors` |
+| Groups | `platform-admins` (JIT, bound to `guardrails-platform-admin` = every verb except impersonate/escalate/bind, plus `guardrails-impersonator` = impersonate users/groups/serviceaccounts only), `gitops-deletion-approvers`, `gitops-deletion-requesters`, `gitops-operators`, `auditors`, `breakglass-custodians` |
+| Impersonation | usable only for reads, access reviews and `--dry-run=server`. Real sessions carry markers in `userInfo.extra` (humans: `scopes.authorization.openshift.io`; SAs: `authentication.kubernetes.io/credential-id`); nobody may impersonate `userextras`; exemptions/approver status require the marker; `guardrails-impersonation-dry-run-only` denies non-dry-run writes without it |
 | Approval TTL | 4h, enforced by CronJob `guardrails-system/approval-reaper` (remove-only; also removes future-dated/invalid timestamps) |
 | Phases | 1 audit `[Audit]` → 2 warn `[Warn,Audit]` → 3 enforce `[Deny,Audit]` → 4 gitops-only mutation for all critical kinds `[Deny,Audit]`; the `-hardened` binding is Deny in all phases; selected by `spec.source.path` of Argo CD app `openshift-gitops/guardrails` |
-| Alerts | `guardrail="true"` label; critical → email + Teams (`group_wait 0s`, repeat 30m); key names: `CriticalResourceDeleted` (out-of-band), `GitOpsCriticalDeletionApplied` (Git path, warning), `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phase 1/2), `GuardrailPolicyModified`, `ImpersonationUsed`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `ArgoCDApplicationControllerMissing`, `AuditLogIngestionStalled`, `GuardrailPolicyEvaluationErrors`, `GuardrailNotificationFailing` |
+| Alerts | `guardrail="true"` label; critical → email + Teams (`group_wait 0s`, repeat 30m); key names: `CriticalResourceDeleted` (out-of-band), `GitOpsCriticalDeletionApplied` (Git path, warning), `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phase 1/2), `GuardrailPolicyModified`, `ImpersonationUsed`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `ArgoCDApplicationControllerMissing`, `AuditLogIngestionStalled`, `GuardrailPolicyEvaluationErrors`, `GuardrailNotificationFailing`, `ImpersonatedWriteDenied` |
 | Audit fields (Loki json) | `verb`, `user_username`, `impersonatedUser_username`, `objectRef_resource/_namespace/_name`, `responseStatus_code`, `annotations_guardrails_critical_delete_decision`, `annotations_validation_policy_admission_k8s_io_validation_failure` |
 | Versions verified | OCP 4.21 = K8s 1.34, Alertmanager 0.29.0 (`msteamsv2_configs`), GitOps 1.19+, Logging 6.x (`observability.openshift.io/v1`), Loki Operator 6.x, OADP 1.5 |
 
@@ -48,7 +49,7 @@ scripts/execute-deletion.sh <res> <name> [-n ns]          # executor
 scripts/cancel-deletion.sh  <res> <name> [-n ns]
 # health / evidence
 scripts/verify-install.sh
-scripts/test-guardrails.sh                                # phase-aware matrix (~60 cases), scratch ns guardrails-test, evidence/ dir
+scripts/test-guardrails.sh                                # phase-aware matrix (~70 cases), scratch ns guardrails-test, evidence/ dir; impersonation mode needs a system:masters credential (pre-prod)
 scripts/audit-query.sh <object-name>                      # prints LogQL + SPL, runs logcli if available
 # local validation
 for o in manifests/base manifests/overlays/*; do kustomize build "$o" >/dev/null; done; yamllint -c .yamllint manifests
@@ -74,6 +75,7 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server
 | Argo CD specifics | `manifests/04-argocd/*`, `docs/05` |
 | What is NOT covered | `docs/01-threat-model.md` §Residual-risk register |
 | Audit findings, fixes, test traceability | `docs/16-production-readiness-review.md` |
+| Impersonation: why `--as` writes are denied | `docs/17-impersonation-control.md` |
 | Justify the design to reviewers | `docs/13-solution-justification.md` |
 | Manual test with expected output | `docs/14-manual-test-guide.md` (T-numbered scenarios) |
 | Learn the whole design step by step | `html/index.html` (portal) → `html/study-guide.html`; `html/docs/*.html` are generated from the Markdown by `scripts/build-html-docs.mjs` (regenerate after editing docs) |

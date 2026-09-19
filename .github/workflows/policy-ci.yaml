@@ -62,6 +62,20 @@ jobs:
           if 'system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server' in cfg['gitopsControllers']: fail.append('argocd-server must not be a gitopsController (UI actions are not Git-reviewed)')
           for u in cfg['gitopsServiceAccounts'] + cfg['reaperUsers']:
               if not u.startswith('system:serviceaccount:'): fail.append(f'human in trusted list: {u}')
+          import glob
+          for f in glob.glob('manifests/02-rbac/*.yaml'):
+              for d in yaml.safe_load_all(open(f)):
+                  if not d: continue
+                  if d['kind'] == 'ClusterRoleBinding' and d['roleRef']['name'] == 'cluster-admin': fail.append(f"{d['metadata']['name']} binds cluster-admin (use guardrails-platform-admin)")
+                  if d['kind'] in ('ClusterRole', 'Role'):
+                      for r in d.get('rules') or []:
+                          verbs, res = r.get('verbs') or [], r.get('resources') or []
+                          if ('impersonate' in verbs or '*' in verbs) and ('userextras' in res or 'uids' in res or ('*' in res and '*' in verbs)):
+                              fail.append(f"{d['metadata']['name']} could impersonate userextras/uids")
+                          if any(v in verbs for v in ('escalate', 'bind')) or ('*' in verbs and '*' in res):
+                              fail.append(f"{d['metadata']['name']} grants escalate/bind or * verbs")
+          if cfg.get('humanAuthExtraKey', 'x') == '' : fail.append('humanAuthExtraKey is empty (needs a written decision)')
+          if cfg.get('requireBoundTokenForPrivileged', True) is False: fail.append('requireBoundTokenForPrivileged is false')
           app = yaml.safe_load(open('manifests/04-argocd/application-guardrails.yaml'))
           if app['metadata'].get('finalizers'): fail.append('guardrails Application must not carry a cascade finalizer')
           if not app['spec']['syncPolicy']['automated'].get('selfHeal'): fail.append('selfHeal must be true')

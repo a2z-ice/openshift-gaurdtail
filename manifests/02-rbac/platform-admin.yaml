@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# Platform administration WITHOUT the impersonate / escalate / bind verbs.
+#
+# cluster-admin is `*` on `*`, which includes `impersonate` on users, groups, serviceaccounts and
+# userextras. With that, a single admin can become an approver (forged approval) or an exempt identity
+# (one-command bypass), and can forge the authentication "extra" fields that prove a session is real.
+#
+# guardrails-platform-admin  : every day-2 verb on every resource and non-resource URL, but NOT
+#                              impersonate (no identity switching), escalate/bind (cannot grant what
+#                              it does not hold, so it cannot give itself impersonate back).
+# guardrails-impersonator    : impersonate ONLY users, groups and serviceaccounts - never `userextras`
+#                              or `uids`. An impersonated session therefore never carries the extras a
+#                              real session has (OAuth scopes for humans, bound-token credential-id for
+#                              service accounts), and admission can tell the difference. Together with
+#                              guardrails-impersonation-dry-run-only this makes impersonation usable for
+#                              `oc auth can-i --as`, reads and `--dry-run=server` only.
+#
+# Bindings: platform-admins (JIT) -> both roles. The break-glass SA -> platform-admin only.
+# The default cluster-admin binding for the group `system:masters` (installer kubeconfig) is untouched:
+# keep that credential in the vault (docs/03).
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-platform-admin
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection", "approve", "use"]
+  - nonResourceURLs: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-impersonator
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups", "serviceaccounts"]
+    verbs: ["impersonate"]
+  # deliberately absent: userextras/*, uids
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-impersonators
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-impersonator
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: platform-admins }

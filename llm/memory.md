@@ -16,6 +16,8 @@
 
 - 2026-09-19: Independent audit (2 reviewers, 59 findings) applied: least-privilege RBAC with Tier A/B, hardened GitOps-only binding (Deny all phases), reaper hardening, alert fixes, script bash-3.2 fixes, AppProject/CR fixes. See docs/16.
 
+- 2026-09-19: Impersonation control (user request): `--as` works only for reads, access reviews and dry-runs. Humans/break-glass off cluster-admin (guardrails-platform-admin + guardrails-impersonator without userextras); markers in userInfo.extra gate exemptions/approver status; policy guardrails-impersonation-dry-run-only. Overlays render 89 objects. docs/17.
+
 ## State log (phase changes, test runs, drills; format: date | cluster | event | evidence)
 - 2026-09-18 | none | repository created, kustomize/yamllint/bash -n pass locally | local
 - 2026-09-18 | none | gap fixes: critical-label-control policy, reaper rejects future timestamps, Argo CD server/appset/operator SAs trusted, 07-hardening-extras added (60 objects per overlay) | local

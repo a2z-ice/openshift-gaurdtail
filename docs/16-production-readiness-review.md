@@ -110,6 +110,8 @@ Every control has at least one automated case (A = section/case in `scripts/test
 | Phase-1 annotation / phase-2 warning | phase-aware run | T1.1 / T15 | CriticalDeleteWouldBeDenied |
 | Self-heal after break-glass edit | – | T8.1 | GuardrailPolicyModified + BreakGlassUsed |
 | Impersonation of approver / of exempt identity / token mint | §9 side-effect | T12, T7.4, T13 | ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted |
+| **Impersonation dry-run only** (write denied, dry-run allowed, access review allowed, impersonated approver/break-glass not honoured, userextras unforgeable) | §10 | T12b | ImpersonatedWriteDenied |
+| Humans and break-glass hold `guardrails-platform-admin`, not `cluster-admin`; no custom role grants impersonate on userextras | verify | docs/17 §Verification | – |
 | kubeadmin / system:admin write | – | B1 (kubeadmin removed; verify) | KubeadminOrSystemAdminUsed |
 | Control-plane exec / debug | – | `oc debug node` on pre-prod once | ControlPlaneNodeAccess |
 | Audit profile / forwarder / rules change out of band | – | T3.8, T10.1 | AuditProfileChanged, AuditForwarderChanged |
@@ -129,4 +131,4 @@ Met: least-privilege RBAC with explicit tiers; fail-closed enforcement in kube-a
 
 Still to observe on your cluster (cannot be proven locally): R3 (does VAP evaluate deletes of its own bindings on your build), R6 (Loki field names after Logging upgrades), the CEL compile on the API server (first `--dry-run=server` in Part C1), and the real latency of alert delivery (T9.2).
 
-Accepted residual risks: R1 (impersonation of exempt identities by a JIT cluster-admin: alerted, provable), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).
+Accepted residual risks: R1 is now closed for human roles by docs/17 (impersonation restricted to reads, access reviews and dry-runs; only the vaulted `system:masters` certificate can still forge identities), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).

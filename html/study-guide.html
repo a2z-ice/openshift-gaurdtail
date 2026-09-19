@@ -95,6 +95,7 @@ small,.muted{color:var(--muted)}
 <li><a href="#ch15">15 · Self-assessment</a></li>
 <li><a href="#ch16">16 · Glossary and references</a></li>
 <li><a href="#ch17">17 · Readiness review and trust model</a></li>
+<li><a href="#ch18">18 · Impersonation control</a></li>
 </ol>
 </nav>
 <main>
@@ -244,7 +245,7 @@ annotations."&lt;policy-name&gt;/&lt;key&gt;"          custom auditAnnotations f
 <ul><li><b><code>resourceNames</code></b> for cluster-scoped objects with known names (the six namespaces, the protected CRDs, the policies and bindings, <code>guardrails-*</code> RBAC, the privileged Groups, <code>APIServer/cluster</code>, <code>OAuth/cluster</code>).</li><li><b>Namespaced RoleBindings</b> (<code>rolebindings.yaml</code>) in the platform namespaces for kinds that cannot be enumerated (Argo CD CRs, logging/alerting/backup CRs, named CronJobs and ConfigMaps).</li></ul>
 <table><tr><th>Tier</th><th>Kinds</th><th>Out-of-band deletion path</th><th>Why</th></tr><tr><td>A (workflow)</td><td>Argo CD CRs, GuardrailConfig, policies, guardrails-* RBAC, Groups, APIServer/OAuth, LokiStack/CLF/rules, OADP objects, named CronJobs/ConfigMaps, NetworkPolicies</td><td>request + 2 approvals + executor</td><td>a patch on these cannot yield code execution or credentials, and the hardened binding blocks spec changes anyway</td></tr><tr><td>B (break-glass)</td><td>Namespaces, CRDs, Subscription/CSV/OperatorGroup, Secrets, ServiceAccounts</td><td>Git (normal) or break-glass (emergency)</td><td>a patch is an escalation primitive: secret contents, conversion webhooks, operator pod specs, PSA labels</td></tr></table>
 <p>Approvers get <code>patch</code> on Tier A so they can append their entry; executors get <code>delete</code>; nobody gets either on Tier B. Separating "can approve" from "can execute" into two roles is what makes the executor a third person in practice. The reaper service account is scoped the same way and is no longer a trusted writer.</p>
-<div class="corner"><span class="t">Corner case: cluster-admin can impersonate an approver</span> <code>oc --as=a1@example.com --as-group=gitops-deletion-approvers annotate ...</code> is authorised for cluster-admin and admission sees a1. Nothing in-process can distinguish it. The controls are: no standing cluster-admin for humans (JIT), the audit event's <code>impersonatedUser</code> field, and the <code>ImpersonationUsed</code> P1 alert. A forged approval is therefore always provable after the fact and always noisy at the time. Keep the <code>impersonate</code> verb out of every custom role.</div>
+<div class="corner"><span class="t">Corner case: impersonating an approver</span> <code>oc --as=a1@example.com --as-group=gitops-deletion-approvers annotate ...</code> used to be a forged approval. Chapter 18 closes it: humans hold <code>guardrails-platform-admin</code> (no <code>impersonate</code> on <code>userextras</code>), a real session carries authentication markers an impersonator cannot forge, approver status requires the marker, and any non-dry-run impersonated write is denied. Impersonation remains available for reads, <code>oc auth can-i</code> and <code>--dry-run=server</code>.</div>
 <div class="corner"><span class="t">Corner case: group sync lag</span> A newly added approver is denied until the sync runs (<code>isApprover</code> is false). Check <code>oc get group gitops-deletion-approvers -o jsonpath='{.users}'</code> before assuming a policy bug.</div>
 
 <h2 id="ch4">4 · Layer 2: Argo CD hardening</h2>
@@ -394,6 +395,7 @@ onlyGuardrailAnnotationsChanged = labels equal && spec/data/rules/subjects/roleR
 <tr><td><code>guardrails-critical-label-control</code> <span class="tag">added in G1</span></td><td>CREATE, UPDATE</td><td>only <code>gitopsServiceAccounts</code>, <code>exemptUsers</code> or approvers may <em>add</em> the critical label</td><td>1 Audit · 2 Warn · 3+ Deny</td></tr>
 <tr><td><code>guardrails-gitops-only-mutation</code> (binding of the same name)</td><td>UPDATE</td><td>critical objects may only be <em>changed</em> by the GitOps path, trusted mutators or break-glass; humans may only touch the guardrail annotations</td><td>1–3 Audit · 4 Deny</td></tr>
 <tr><td><code>guardrails-gitops-only-mutation</code> (binding <code>-hardened</code>) <span class="tag">added after the audit</span></td><td>UPDATE of GuardrailConfig, policies/bindings, guardrails-* RBAC, privileged Groups, APIServer/OAuth, labelled CronJobs</td><td>same rule, scoped to the self-protection set</td><td><b>Deny in every phase</b></td></tr>
+<tr><td><code>guardrails-impersonation-dry-run-only</code> <span class="tag">Chapter 18</span></td><td>every CREATE, UPDATE, DELETE (access reviews and system components excluded)</td><td>identity without its authentication marker (impersonated or legacy token) may only write with <code>--dry-run=server</code></td><td>1 Audit · 2 Warn · 3+ Deny</td></tr>
 <tr><td><code>guardrails-rbac-escalation-audit</code></td><td>CREATE, UPDATE, DELETE on bindings and groups</td><td>"fails" (never denies) on bindings to privileged ClusterRoles or changes to privileged groups so the audit event is stamped and the client warned</td><td>always Warn + Audit</td></tr></table>
 
 <h3 id="ch5-reaper">5.7 The reaper</h3>
@@ -727,7 +729,8 @@ spec:
 <tr><td>31</td><td>Policy renamed</td><td>Loki field names for its annotations change; rules stop matching</td><td>key derives from policy name</td><td>never rename; if you must, update rules in the same PR</td></tr>
 <tr><td>32</td><td>Logging operator major upgrade</td><td>json field names may change</td><td>data model</td><td>run the test matrix after every upgrade (R6)</td></tr>
 <tr><td>33</td><td>Second Argo CD instance</td><td>its controllers are not gitopsControllers, its CR unprotected until labelled</td><td>name rule covers openshift-gitops only</td><td>extend gitopsControllers/gitopsServiceAccounts by PR; label in Git</td></tr>
-<tr><td>41</td><td>cluster-admin impersonates the Argo CD controller or break-glass</td><td>allowed (exempt identity); <code>PrivilegedIdentityImpersonated</code> P1</td><td>admission cannot see impersonation</td><td>JIT cluster-admin is a hard prerequisite; incident</td></tr>
+<tr><td>41</td><td>Platform admin impersonates the Argo CD controller or break-glass</td><td>write denied (no bound-token marker → not exempt, and impersonated writes are dry-run only); <code>ImpersonatedWriteDenied</code> + <code>PrivilegedIdentityImpersonated</code> P1</td><td>Chapter 18</td><td>incident</td></tr>
+<tr><td>44</td><td>Cluster uses external OIDC instead of OpenShift OAuth</td><td>human sessions may lack the OAuth marker → all human writes denied in phase 3</td><td>marker key is OAuth-specific</td><td>set <code>humanAuthExtraKey</code> to an extra your OIDC populates, or empty it; the SA marker still protects exemptions</td></tr>
 <tr><td>42</td><td>Approver tries to read an Argo CD cluster Secret or delete a Namespace</td><td>RBAC Forbidden</td><td>Tier B has no human role</td><td>Git or break-glass</td></tr>
 <tr><td>43</td><td>Tenant labels a Secret critical (via Git in their own repo)</td><td>their Argo CD instance is not a gitopsController → denied unless approver</td><td>label control</td><td>platform decides what is critical</td></tr>
 <tr><td>34</td><td>Namespace-scoped Role/RoleBinding named guardrails-*</td><td>not protected unless labelled: the named binding lists only ClusterRoles/ClusterRoleBindings</td><td>binding B scope excludes namespaced RBAC</td><td>label namespaced guardrail RBAC in Git</td></tr>
@@ -796,6 +799,33 @@ spec:
 <p>What this shifts: the repository controls (Chapter 11) and the controller identity become the crown jewels. Hence the new residual risk R7 and its compensating controls: no-bypass ruleset, secret scanning, CI invariants that refuse <code>argocd-server</code> or any human in <code>gitopsControllers</code>, Argo CD RBAC that denies <code>override</code> and any create/update in the guardrails project, <code>PrivilegedTokenMinted</code> and <code>PrivilegedIdentityImpersonated</code> alerts, and the requirement that every <code>GitOpsCriticalDeletionApplied</code> correlates with a merged PR.</p>
 <h3>17.3 Coverage</h3>
 <p>Every control in this guide maps to at least one automated case in <code>scripts/test-guardrails.sh</code> (phase-aware, about sixty cases, evidence retained) or one manual case in <code>docs/14</code>, plus the alert that proves detection. The matrix in <code>docs/16</code> §3 is the checklist for sign-off; a new control is not done until it has a row there.</p>
+<h2 id="ch18">18 · Impersonation control: check with <code>--as</code>, never change with it</h2>
+<p>Chapter 3 listed impersonation as the residual one-command bypass: admission sees only the resulting identity, never the <code>Impersonate-*</code> headers. The platform owner's requirement is exact: impersonation may be used only for dry-runs, client-side and server-side. Client-side dry-runs never reach the API server, so the work is on the server side. Full design: <code>docs/17-impersonation-control.md</code>.</p>
+<h3>18.1 The insight: real sessions carry markers that an impersonator cannot forge</h3>
+<table><tr><th>Session</th><th>Marker in <code>request.userInfo.extra</code></th></tr>
+<tr><td>Human through OpenShift OAuth (any IdP)</td><td><code>scopes.authorization.openshift.io</code> (for example <code>user:full</code>)</td></tr>
+<tr><td>Service account with a bound token (every pod, <code>oc create token</code>)</td><td><code>authentication.kubernetes.io/credential-id</code> (<code>JTI=…</code>, GA since Kubernetes 1.32)</td></tr>
+<tr><td>Impersonated copy of either</td><td>none, <em>provided</em> the impersonator cannot impersonate <code>userextras</code></td></tr></table>
+<p>The impersonation filter adds extras to the assumed identity only from <code>Impersonate-Extra-*</code> headers, and each such header needs RBAC <code>impersonate</code> on <code>userextras/&lt;key&gt;</code>. <code>cluster-admin</code> has it (<code>*</code>). So the first half of the control is RBAC: nobody human holds <code>cluster-admin</code>.</p>
+<h3>18.2 RBAC half</h3>
+<ul><li><code>guardrails-platform-admin</code>: every verb on every resource and non-resource URL <em>except</em> <code>impersonate</code>, <code>escalate</code> and <code>bind</code>. Without <code>escalate</code>/<code>bind</code> the holder cannot grant themselves the missing verbs (Kubernetes' RBAC escalation check), so this is stable.</li><li><code>guardrails-impersonator</code>: <code>impersonate</code> on <code>users</code>, <code>groups</code>, <code>serviceaccounts</code> only. Bound to <code>platform-admins</code> so JIT admins can still run <code>oc auth can-i --as</code> and <code>--dry-run=server --as</code>.</li><li>The break-glass SA is bound to <code>guardrails-platform-admin</code>: it needs no impersonation.</li><li>Only the group <code>system:masters</code> (the installer certificate, vaulted) keeps <code>cluster-admin</code>; <code>verify-install.sh</code> fails if any other group is bound to it or any custom role grants impersonate on <code>userextras</code>.</li></ul>
+<h3>18.3 Admission half</h3>
+<pre><code>guardrails-impersonation-dry-run-only   (all writes; access reviews and system:* components excluded)
+  impersonated = (privileged SA && !hasBoundToken) || (human && !hasHumanMarker)
+  allow iff     request.dryRun || !impersonated
+and in every other policy:
+  isExempt / isGitOps / isReaper / isOlm / isTrusted*  require the bound-token marker
+  isApprover / isRequester                              require the human marker</code></pre>
+<p>Only <em>privileged</em> service accounts are marker-checked, so a tenant workload still using a legacy secret-based token is unaffected (impersonating an unprivileged SA gains nothing). Access-review groups are skipped so <code>oc auth can-i --as</code> keeps working. The result: under <code>--as</code>, reads and access reviews work, server dry-runs work and show what an <em>ordinary</em> user would get (no exemptions, no approver rights), and every real write is denied and alerted (<code>ImpersonatedWriteDenied</code>).</p>
+<h3>18.4 Corner cases</h3>
+<table><tr><th>Case</th><th>Behaviour and action</th></tr>
+<tr><td>External OIDC instead of OpenShift OAuth</td><td>humans may lack the OAuth marker; set <code>humanAuthExtraKey</code> to an extra your provider populates or to <code>""</code>. The SA marker still protects exemptions.</td></tr>
+<tr><td>Client-certificate humans</td><td>no marker; do not issue certificate identities to humans.</td></tr>
+<tr><td>Legacy secret token on a privileged SA</td><td>treated as impersonated; never create such secrets for guardrail identities.</td></tr>
+<tr><td><code>system:admin</code></td><td>skipped by the <code>system:</code> condition and able to forge extras; vaulted and alerted.</td></tr>
+<tr><td>Test script in impersonation mode</td><td>it forges markers with <code>--as-user-extra</code>, which only <code>system:masters</code> may do: run it on pre-prod with the installer kubeconfig, or use real logins (<code>IMPERSONATE=false</code>).</td></tr>
+<tr><td>Phase 1/2</td><td>binding is Audit/Warn: impersonated writes succeed with the <code>impersonated-write</code> audit annotation; observe before phase 3.</td></tr></table>
+<p><b>Lesson.</b> When a control cannot see the thing it needs to decide on, look for an unforgeable side effect of the legitimate path (here: authentication extras) and remove every way to forge it (here: <code>impersonate</code> on <code>userextras</code>). Prevention then follows from detection.</p>
 <p class="muted">End of study guide.</p>
 </main>
 </div>
