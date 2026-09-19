@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Operators required for in-cluster audit-log alerting.
+#   Red Hat OpenShift Logging 6.x (Vector collector, ClusterLogForwarder v1)
+#   Loki Operator (LokiStack; ruler evaluates AlertingRules on the audit tenant)
+#   Cluster Observability Operator (optional: UI plugin to browse logs in the console)
+# Channel names: verify with `oc get packagemanifest -n openshift-marketplace cluster-logging loki-operator -o jsonpath='{.items[*].status.defaultChannel}'`
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+    openshift.io/cluster-monitoring: "true"
+  annotations:
+    openshift.io/node-selector: ""
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-operators-redhat
+  labels:
+    openshift.io/cluster-monitoring: "true"
+  annotations:
+    openshift.io/node-selector: ""
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-logging
+  namespace: openshift-logging
+spec:
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-operators-redhat
+  namespace: openshift-operators-redhat
+spec:
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: cluster-logging
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  channel: stable-6.4
+  name: cluster-logging
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: loki-operator
+  namespace: openshift-operators-redhat
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  channel: stable-6.4
+  name: loki-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

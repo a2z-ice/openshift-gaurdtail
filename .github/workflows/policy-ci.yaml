@@ -1,0 +1,65 @@
+name: policy-ci
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash -s -- 5.6.0 /usr/local/bin
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz -C /usr/local/bin kubeconform
+          pipx install yamllint
+      - name: yamllint
+        run: yamllint -c .yamllint manifests
+      - name: kustomize build (all phases)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for o in manifests/base manifests/overlays/phase1-audit manifests/overlays/phase2-warn manifests/overlays/phase3-enforce manifests/overlays/phase4-gitops-only; do
+            kustomize build "$o" > "out/$(basename "$o").yaml"
+          done
+      - name: kubeconform (schema validation; CRDs skipped)
+        run: |
+          set -euo pipefail
+          for f in out/*.yaml; do
+            kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.34.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary "$f"
+          done
+      - name: guardrail invariants
+        run: |
+          set -euo pipefail
+          # 1. the enforce overlay must Deny
+          grep -q '"Deny"' manifests/03-guardrails/vap-critical-delete-bindings.yaml
+          # 2. the guardrails Application must never carry the cascade finalizer or prune=true
+          ! grep -q 'resources-finalizer.argocd.argoproj.io' manifests/04-argocd/application-guardrails.yaml
+          ! grep -Eq 'prune: *true' manifests/04-argocd/application-guardrails.yaml
+          # 3. no human identity in exemptUsers
+          ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@' 
+          # 4. minApprovers >= 2
+          test "$(grep -E '^\s+minApprovers:' manifests/03-guardrails/guardrailconfig-default.yaml | awk '{print $2}')" -ge 2
+          # 5. no plaintext secrets
+          ! grep -RIE 'sig=[A-Za-z0-9_-]{20,}|smtp_auth_password: *[^R]' manifests | grep -v REPLACE
+          echo "invariants OK"
+      - name: shellcheck scripts
+        run: |
+          sudo apt-get install -y shellcheck >/dev/null
+          shellcheck -x scripts/*.sh
+      - name: Server-side dry-run on pre-prod (optional)
+        if: ${{ env.PREPROD_KUBECONFIG != '' }}
+        env:
+          PREPROD_KUBECONFIG: ${{ secrets.PREPROD_KUBECONFIG }}
+        run: |
+          echo "$PREPROD_KUBECONFIG" > kc; export KUBECONFIG=kc
+          curl -sSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable-4.21/openshift-client-linux.tar.gz | tar xz -C /usr/local/bin oc
+          oc apply --server-side --dry-run=server -f out/phase3-enforce.yaml

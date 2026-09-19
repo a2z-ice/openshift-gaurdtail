@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-rbac-escalation-audit
+#
+# Purpose : DETECTION rule, never blocks. Any create/update/delete of a binding to a
+#           privileged ClusterRole, or of membership of a privileged group, "fails"
+#           this validation so kube-apiserver stamps
+#           annotations["validation.policy.admission.k8s.io/validation_failure"]
+#           on the audit event. The Loki alert PrivilegedRBACChange keys off it.
+#           The client also receives a Warning header so the operator knows it was flagged.
+# Phase   : all phases, validationActions [Warn, Audit] (never Deny)
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-rbac-escalation-audit
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-rbac-escalation-audit
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Ignore
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["clusterrolebindings", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["groups"]
+  variables:
+    - name: ref
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: privilegedBinding
+      expression: >-
+        request.resource.group == 'rbac.authorization.k8s.io'
+        && has(variables.ref.roleRef) && variables.ref.roleRef.name in params.spec.privilegedClusterRoles
+    - name: privilegedGroup
+      expression: >-
+        request.resource.group == 'user.openshift.io' && variables.ref.metadata.name in params.spec.privilegedGroups
+  validations:
+    - expression: "!(variables.privilegedBinding || variables.privilegedGroup)"
+      messageExpression: >-
+        'FLAGGED FOR AUDIT (not blocked): privileged RBAC/group change by ' + request.userInfo.username
+        + ' on ' + request.resource.resource + ' ' + request.name + '. A security alert has been raised.'
+  auditAnnotations:
+    - key: privileged-change
+      valueExpression: >-
+        (variables.privilegedBinding || variables.privilegedGroup)
+        ? ('op=' + request.operation + ' user=' + request.userInfo.username + ' resource=' + request.resource.resource + ' name=' + request.name)
+        : null
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-rbac-escalation-audit
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-rbac-escalation-audit
+  paramRef:
+    name: default
+    parameterNotFoundAction: Allow
+  validationActions: ["Warn", "Audit"]

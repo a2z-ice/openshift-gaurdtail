@@ -1,0 +1,13 @@
+# PHASE 3 - ENFORCE deletion guardrail (Deny). GitOps-only mutation stays Audit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Application
+      name: guardrails
+    patch: |
+      - op: replace
+        path: /spec/source/path
+        value: manifests/overlays/phase3-enforce

@@ -1,0 +1,71 @@
+# Machine-readable facts for AI tools. Single source; AGENTS.md is the prose twin. Keep both in sync.
+repo:
+  purpose: OpenShift 4.21 audit trail + two-person deletion guardrail (ValidatingAdmissionPolicy) + email/Teams alerting + backups
+  entrypoints: [AGENTS.md, llm/memory.md, .claude/skills/]
+  validate: ["for o in manifests/base manifests/overlays/*; do kustomize build \"$o\" >/dev/null; done", "yamllint -c .yamllint manifests", "bash -n scripts/*.sh"]
+platform:
+  ocp: "4.21"
+  kubernetes: "1.34"
+  alertmanager: "0.29.0"
+  gitops: ">=1.19"
+  logging_api: observability.openshift.io/v1
+guardrail:
+  prefix: guardrails.example.com
+  critical_label: guardrails.example.com/critical=true
+  annotations:
+    request: guardrails.example.com/delete-request          # "<ticket>: <reason>"
+    requested_by: guardrails.example.com/delete-requested-by # must equal caller
+    approvals: guardrails.example.com/delete-approvals      # "user|RFC3339Z,user|RFC3339Z", append one entry per approver
+  param: { kind: GuardrailConfig, apiVersion: guardrails.example.com/v1alpha1, name: default }
+  min_approvers: 2
+  executor_may_be_approver: false
+  approval_ttl: 4h
+  exempt_users: [system:apiserver, system:serviceaccount:guardrails-system:breakglass]
+  gitops_service_accounts: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller]
+  reaper: { cronjob: guardrails-system/approval-reaper, may: remove-only }
+  policies:
+    - { name: guardrails-critical-delete, bindings: [guardrails-critical-delete-labelled, guardrails-critical-delete-named], rules: [V1 delete, V2 label, V3 approvals, V4 request] }
+    - { name: guardrails-gitops-only-mutation, bindings: [guardrails-gitops-only-mutation] }
+    - { name: guardrails-rbac-escalation-audit, bindings: [guardrails-rbac-escalation-audit], never_denies: true }
+  name_protected:
+    namespaces: [openshift-gitops, openshift-gitops-operator, guardrails-system, openshift-logging, openshift-adp]
+    crd_groups: [argoproj.io, guardrails.example.com, loki.grafana.com, observability.openshift.io, velero.io, oadp.openshift.io]
+    name_prefix: guardrails-
+    other: [ArgoCD/openshift-gitops, APIServer/cluster, OLM objects in openshift-gitops-operator, groups platform-admins/gitops-deletion-*]
+groups:
+  platform-admins: cluster-admin, JIT, empty at rest
+  gitops-deletion-approvers: may approve (>=4 members, >=2 teams)
+  gitops-deletion-requesters: may request and execute
+  gitops-operators: Argo CD day-2, no delete
+  auditors: read-only
+phases:
+  - { id: 1, overlay: manifests/overlays/phase1-audit, delete_actions: [Audit] }
+  - { id: 2, overlay: manifests/overlays/phase2-warn, delete_actions: [Warn, Audit] }
+  - { id: 3, overlay: manifests/overlays/phase3-enforce, delete_actions: [Deny, Audit], mutation_actions: [Audit] }
+  - { id: 4, overlay: manifests/overlays/phase4-gitops-only, delete_actions: [Deny, Audit], mutation_actions: [Deny, Audit] }
+phase_selector: 'spec.source.path of Application openshift-gitops/guardrails (change via PR)'
+alerts:
+  label: guardrail=true
+  critical_route: { receivers: [email, msteamsv2], group_wait: 0s, repeat: 30m }
+  key_alerts: [CriticalResourceDeleted, GitOpsResourceDeleted, CriticalResourceDeleteDenied, GuardrailPolicyModified, AuditProfileChanged, PrivilegedRBACChange, ImpersonationUsed, BreakGlassUsed, KubeadminOrSystemAdminUsed, ArgoCDApplicationControllerMissing, GitOpsNamespaceTerminating, AuditLogIngestionStalled]
+audit:
+  profile: WriteRequestBodies
+  loki_tenant: audit
+  loki_fields: [verb, user_username, impersonatedUser_username, objectRef_resource, objectRef_namespace, objectRef_name, responseStatus_code, annotations_guardrails_critical_delete_decision, annotations_validation_policy_admission_k8s_io_validation_failure]
+  siem: { type: splunk, index: openshift_audit }
+scripts:
+  request: 'scripts/request-deletion.sh <res> <name> [-n ns] "<ticket>: <reason>"'
+  approve: scripts/approve-deletion.sh <res> <name> [-n ns]
+  execute: scripts/execute-deletion.sh <res> <name> [-n ns]
+  cancel: scripts/cancel-deletion.sh <res> <name> [-n ns]
+  verify: scripts/verify-install.sh
+  test: scripts/test-guardrails.sh
+  audit_query: scripts/audit-query.sh <name>
+never:
+  - add a human to exemptUsers
+  - minApprovers < 2 or executorMayBeApprover true
+  - remove Deny from phase-3/4 bindings
+  - resources-finalizer or prune=true on the guardrails Application
+  - impersonation, kubeadmin, system:admin or break-glass to pass a deletion
+  - secrets in Git
+  - hand-apply manifests outside phase-1 bootstrap / break-glass

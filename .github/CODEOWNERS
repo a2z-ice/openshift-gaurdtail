@@ -1,0 +1,14 @@
+# Every path below needs review from the listed team(s). Combined with the branch ruleset
+# (2 approvals, code-owner review required, dismiss stale reviews, no bypass) this is the
+# Git-side two-person rule: no single person can merge a change to the guardrails.
+*                                   @example-org/platform-engineering
+/manifests/03-guardrails/           @example-org/platform-engineering @example-org/security
+/manifests/02-rbac/                 @example-org/platform-engineering @example-org/security
+/manifests/00-namespaces-and-groups/ @example-org/platform-engineering @example-org/security
+/manifests/01-audit/                @example-org/platform-engineering @example-org/security
+/manifests/05-alerting/             @example-org/platform-engineering @example-org/security
+/manifests/04-argocd/               @example-org/platform-engineering
+/manifests/06-backup/               @example-org/platform-engineering
+/manifests/overlays/                @example-org/platform-engineering @example-org/security
+/.github/                           @example-org/platform-engineering @example-org/security
+/docs/                              @example-org/platform-engineering

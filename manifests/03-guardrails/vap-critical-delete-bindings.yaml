@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Bindings for guardrails-critical-delete.
+#   A "labelled": any object of the matched kinds carrying guardrails.example.com/critical=true.
+#                 objectSelector is evaluated against object OR oldObject, so removing the label
+#                 in the same UPDATE does not escape the policy.
+#   B "named"   : low-traffic kinds protected by name/namespace rules regardless of label
+#                 (namespaces, CRDs, the policies themselves, groups, apiservers, OLM, argocds, guardrailconfigs).
+# parameterNotFoundAction: Deny + failurePolicy: Fail => fail CLOSED if GuardrailConfig/default is missing.
+# Phase: this file is the PHASE 3 (enforce) version; overlays patch validationActions for phases 1-2.
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-critical-delete-labelled
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-critical-delete
+  paramRef:
+    name: default
+    parameterNotFoundAction: Deny
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    objectSelector:
+      matchLabels:
+        guardrails.example.com/critical: "true"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-critical-delete-named
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-critical-delete
+  paramRef:
+    name: default
+    parameterNotFoundAction: Deny
+  validationActions: ["Deny", "Audit"]
+  matchResources:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["namespaces"]
+      - apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["customresourcedefinitions"]
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+      - apiGroups: ["guardrails.example.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["guardrailconfigs"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["groups"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterroles", "clusterrolebindings"]
+      - apiGroups: ["config.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["apiservers", "oauths"]
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["argocds"]
+      - apiGroups: ["operators.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+      - apiGroups: ["olm.operatorframework.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterextensions"]

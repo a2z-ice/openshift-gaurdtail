@@ -1,0 +1,35 @@
+# PHASE 2 - WARN. Users see the denial message as a Warning header but the request succeeds.
+# Run for >= 1 week; zero unexplained warnings is the exit criterion.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-critical-delete-labelled
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Warn", "Audit"]
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-critical-delete-named
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Warn", "Audit"]
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-gitops-only-mutation
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Warn", "Audit"]
+  - target:
+      kind: Application
+      name: guardrails
+    patch: |
+      - op: replace
+        path: /spec/source/path
+        value: manifests/overlays/phase2-warn

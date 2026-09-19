@@ -1,0 +1,131 @@
+# ---------------------------------------------------------------------------
+# Metrics-based alerts: a SECOND detection channel that does not depend on the audit pipeline.
+# If Argo CD disappears, these fire even if the audit forwarder was tampered with first.
+# openshift-gitops carries openshift.io/cluster-monitoring=true (set by the operator) so platform
+# Prometheus evaluates this rule. Verify: oc get ns openshift-gitops --show-labels
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: guardrails-gitops-health
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  groups:
+    - name: guardrails.gitops.availability
+      rules:
+        - alert: ArgoCDApplicationControllerMissing
+          expr: |
+            absent(kube_statefulset_status_replicas_ready{namespace="openshift-gitops", statefulset="openshift-gitops-application-controller"})
+            or kube_statefulset_status_replicas_ready{namespace="openshift-gitops", statefulset="openshift-gitops-application-controller"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Argo CD application controller is gone or has 0 ready replicas"
+            description: "The GitOps control loop is not running. Check whether the ArgoCD CR, the namespace or the operator was deleted, then follow the restore runbook."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#restore-argo-cd
+        - alert: ArgoCDServerMissing
+          expr: |
+            absent(kube_deployment_status_replicas_available{namespace="openshift-gitops", deployment="openshift-gitops-server"})
+            or kube_deployment_status_replicas_available{namespace="openshift-gitops", deployment="openshift-gitops-server"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Argo CD API/UI server unavailable"
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#restore-argo-cd
+        - alert: ArgoCDNoApplicationsReported
+          expr: absent(argocd_app_info{namespace="openshift-gitops"})
+          for: 5m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Argo CD reports no Applications at all (metrics absent)"
+            description: "Either every Application was deleted or the controller is down. Both are incidents."
+        - alert: GitOpsNamespaceTerminating
+          expr: kube_namespace_status_phase{namespace=~"openshift-gitops|openshift-gitops-operator|guardrails-system|openshift-logging", phase="Terminating"} == 1
+          for: 0m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Namespace {{ $labels.namespace }} is Terminating"
+            description: "A protected namespace entered Terminating. Deletion should have been blocked - check BreakGlassUsed / ImpersonationUsed alerts."
+        - alert: GitOpsOperatorMissing
+          expr: absent(kube_deployment_status_replicas_available{namespace="openshift-gitops-operator", deployment=~"openshift-gitops-operator-controller-manager.*"})
+          for: 10m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "OpenShift GitOps operator deployment is gone"
+            description: "The Subscription/CSV may have been removed. Reinstall via the operator manifests in Git."
+        - alert: GuardrailApplicationOutOfSyncOrMissing
+          expr: |
+            absent(argocd_app_info{namespace="openshift-gitops", name="guardrails"})
+            or argocd_app_info{namespace="openshift-gitops", name="guardrails", sync_status!="Synced"} == 1
+            or argocd_app_info{namespace="openshift-gitops", name="guardrails", health_status!="Healthy"} == 1
+          for: 10m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "The 'guardrails' Argo CD Application is missing, OutOfSync or unhealthy"
+            description: "Self-heal of the guardrail objects is not working. Drift may persist."
+    - name: guardrails.detection-pipeline
+      rules:
+        - alert: AuditLogIngestionStalled
+          expr: |
+            sum(rate(loki_distributor_lines_received_total{namespace="openshift-logging", tenant="audit"}[10m])) == 0
+            or absent(loki_distributor_lines_received_total{namespace="openshift-logging", tenant="audit"})
+          for: 10m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "No audit log lines reached Loki for 10 minutes - audit alerting is BLIND"
+            description: "Check the collector pods (oc get pods -n openshift-logging -l app.kubernetes.io/component=collector), the ClusterLogForwarder status and the LokiStack."
+        - alert: AuditForwarderNotReady
+          expr: |
+            kube_pod_status_ready{namespace="openshift-logging", condition="true", pod=~"audit-forwarder-.*"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Audit forwarder collector pod {{ $labels.pod }} not ready"
+        - alert: GuardrailReaperFailing
+          expr: |
+            kube_job_status_failed{namespace="guardrails-system", job_name=~"approval-reaper-.*"} > 0
+          for: 0m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Approval reaper job failed - expired approvals may linger"
+            description: "oc logs -n guardrails-system job/{{ $labels.job_name }}"
+        - alert: LokiRulerDown
+          expr: |
+            absent(up{namespace="openshift-logging", job=~"logging-loki-ruler.*"}) or up{namespace="openshift-logging", job=~"logging-loki-ruler.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Loki ruler is down - audit AlertingRules are not being evaluated"

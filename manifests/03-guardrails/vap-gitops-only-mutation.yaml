@@ -1,0 +1,134 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-gitops-only-mutation
+#
+# Purpose : critical resources may only be CHANGED by the GitOps controller
+#           (Argo CD application-controller SA), the break-glass SA, or through
+#           the guardrail annotation workflow. Humans hand-editing Argo CD config,
+#           the audit profile, the log forwarder or the alerting rules out of band
+#           are stopped (phase 4) or flagged (phases 1-3).
+# Phase   : 1-3 validationActions [Audit]  -> detection only, alert ArgoCDDirectMutation
+#           4   validationActions [Deny, Audit]
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-gitops-only-mutation
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-gitops-only-mutation
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["argocds", "applications", "applicationsets", "appprojects"]
+      - apiGroups: ["guardrails.example.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["guardrailconfigs"]
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+      - apiGroups: ["config.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["apiservers", "oauths"]
+      - apiGroups: ["loki.grafana.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["lokistacks", "alertingrules", "rulerconfigs"]
+      - apiGroups: ["observability.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["clusterlogforwarders"]
+      - apiGroups: ["monitoring.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["prometheusrules"]
+      - apiGroups: ["velero.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["schedules", "backupstoragelocations"]
+      - apiGroups: ["oadp.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["dataprotectionapplications"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["clusterroles", "clusterrolebindings"]
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["secrets", "configmaps"]
+  variables:
+    - name: oldLabels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: newLabels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: oldAnn
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: newAnn
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: labelCritical
+      expression: "'guardrails.example.com/critical' in variables.oldLabels && variables.oldLabels['guardrails.example.com/critical'] == 'true'"
+    - name: nameCritical
+      expression: >-
+        (request.resource.group == 'admissionregistration.k8s.io' && oldObject.metadata.name.startsWith('guardrails-'))
+        || (request.resource.group == 'guardrails.example.com')
+        || (request.resource.group == 'config.openshift.io')
+        || (request.resource.group == 'rbac.authorization.k8s.io' && oldObject.metadata.name.startsWith('guardrails-'))
+        || (request.resource.group == 'argoproj.io' && request.resource.resource == 'argocds' && has(request.namespace) && request.namespace == 'openshift-gitops')
+    - name: isCritical
+      expression: "variables.labelCritical || variables.nameCritical"
+    - name: isTrustedWriter
+      expression: "request.userInfo.username in params.spec.exemptUsers || request.userInfo.username in params.spec.gitopsServiceAccounts || request.userInfo.username in params.spec.reaperUsers"
+    - name: nonGuardrailAnnotationsUnchanged
+      expression: >-
+        variables.newAnn.all(k, k.startsWith('guardrails.example.com/delete-') || (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k]))
+        && variables.oldAnn.all(k, k.startsWith('guardrails.example.com/delete-') || k in variables.newAnn)
+    - name: payloadUnchanged
+      expression: >-
+        variables.newLabels == variables.oldLabels
+        && has(object.spec) == has(oldObject.spec) && (!has(object.spec) || object.spec == oldObject.spec)
+        && has(object.data) == has(oldObject.data) && (!has(object.data) || object.data == oldObject.data)
+        && has(object.rules) == has(oldObject.rules) && (!has(object.rules) || object.rules == oldObject.rules)
+        && has(object.subjects) == has(oldObject.subjects) && (!has(object.subjects) || object.subjects == oldObject.subjects)
+        && has(object.roleRef) == has(oldObject.roleRef) && (!has(object.roleRef) || object.roleRef == oldObject.roleRef)
+  validations:
+    - expression: >-
+        !variables.isCritical || variables.isTrustedWriter
+        || (variables.payloadUnchanged && variables.nonGuardrailAnnotationsUnchanged)
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL: critical ' + request.resource.resource + ' ' + (has(request.namespace) ? request.namespace + '/' : '') + request.name
+        + ' may only be changed through Git (Argo CD) - direct edit by ' + request.userInfo.username
+        + ' is not permitted. Open a PR. Runbook: ' + params.spec.runbookURL
+  auditAnnotations:
+    - key: direct-mutation
+      valueExpression: >-
+        variables.isCritical && !variables.isTrustedWriter && !(variables.payloadUnchanged && variables.nonGuardrailAnnotationsUnchanged)
+        ? ('user=' + request.userInfo.username + ' resource=' + request.resource.resource + ' name=' + request.name)
+        : null
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-gitops-only-mutation
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-gitops-only-mutation
+  paramRef:
+    name: default
+    parameterNotFoundAction: Deny
+  # Phases 1-3: Audit only (detection). Phase 4 overlay switches to [Deny, Audit].
+  validationActions: ["Audit"]

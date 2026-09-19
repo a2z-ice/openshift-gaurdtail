@@ -1,0 +1,101 @@
+# ---------------------------------------------------------------------------
+# GuardrailConfig CRD
+# Purpose : single, cluster-scoped parameter object consumed by every guardrail
+#           ValidatingAdmissionPolicy (via paramRef). Changing the rules of the
+#           two-person deletion control means changing THIS object, which is
+#           itself a critical resource (group guardrails.example.com is matched
+#           by name in the policy), so the change needs approvals too.
+# Phase   : 1 (install first; policies fail closed without it)
+# Rollback: oc delete crd guardrailconfigs.guardrails.example.com   (needs approvals once enforced)
+# ---------------------------------------------------------------------------
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: guardrailconfigs.guardrails.example.com
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  group: guardrails.example.com
+  scope: Cluster
+  names:
+    plural: guardrailconfigs
+    singular: guardrailconfig
+    kind: GuardrailConfig
+    shortNames: [gcfg]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: MinApprovers
+          type: integer
+          jsonPath: .spec.minApprovers
+        - name: ApprovalTTL
+          type: string
+          jsonPath: .spec.approvalTTL
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [minApprovers, approverGroups]
+              properties:
+                minApprovers:
+                  description: Minimum number of DISTINCT approvers required before a critical resource may be deleted.
+                  type: integer
+                  minimum: 2
+                  default: 2
+                executorMayBeApprover:
+                  description: If false (recommended) the identity performing the DELETE must not be one of the approvers, i.e. three distinct people are involved.
+                  type: boolean
+                  default: false
+                approverGroups:
+                  description: OpenShift/IdP groups whose members may record an approval.
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                requesterGroups:
+                  description: Groups whose members may open a deletion request. Approver groups are implicitly allowed to request.
+                  type: array
+                  default: []
+                  items: { type: string }
+                exemptUsers:
+                  description: >-
+                    Identities fully exempt from the guardrail. Keep this to the API server loopback identity and the
+                    break-glass service account whose token is held under dual control in the vault. NEVER add humans.
+                  type: array
+                  default: ["system:apiserver"]
+                  items: { type: string }
+                reaperUsers:
+                  description: Identities allowed ONLY to remove expired approval entries (never to add them).
+                  type: array
+                  default: ["system:serviceaccount:guardrails-system:approval-reaper"]
+                  items: { type: string }
+                gitopsServiceAccounts:
+                  description: Identities allowed to mutate critical resources (spec/data) - normally only the Argo CD application controller.
+                  type: array
+                  default:
+                    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
+                  items: { type: string }
+                privilegedClusterRoles:
+                  description: ClusterRoles whose binding changes are flagged by the rbac-escalation audit policy.
+                  type: array
+                  default: ["cluster-admin", "admin", "guardrails-approver", "guardrails-breakglass"]
+                  items: { type: string }
+                privilegedGroups:
+                  description: Groups whose membership changes are flagged by the rbac-escalation audit policy.
+                  type: array
+                  default: ["platform-admins", "gitops-deletion-approvers", "gitops-deletion-requesters"]
+                  items: { type: string }
+                approvalTTL:
+                  description: How long an approval stays valid (Go duration). Enforced by the reaper CronJob, not by admission.
+                  type: string
+                  default: "4h"
+                  pattern: '^[0-9]+(m|h)$'
+                runbookURL:
+                  description: Link included in every denial message and alert.
+                  type: string
+                  default: "https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md"

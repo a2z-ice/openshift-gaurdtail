@@ -1,0 +1,1 @@
+Read AGENTS.md at the repository root before doing anything; it holds the hard rules, facts, commands and a read map. Task procedures are in .claude/skills/*/SKILL.md. Record state changes in llm/memory.md. Never weaken the deletion guardrail or bypass the request → approve ×2 → execute workflow.

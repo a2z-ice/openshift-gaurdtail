@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# AppProject "guardrails": the only project allowed to manage the guardrail kinds,
+# pinned to the one repository and to in-cluster destinations.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: guardrails
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+    # NO resources-finalizer: deleting the project must never cascade.
+spec:
+  description: Deletion guardrails, audit forwarding, alerting and backup configuration (platform-engineering)
+  sourceRepos:
+    - https://github.com/example-org/openshift-administration.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: guardrails-system
+    - server: https://kubernetes.default.svc
+      namespace: openshift-gitops
+    - server: https://kubernetes.default.svc
+      namespace: openshift-gitops-operator
+    - server: https://kubernetes.default.svc
+      namespace: openshift-logging
+    - server: https://kubernetes.default.svc
+      namespace: openshift-monitoring
+    - server: https://kubernetes.default.svc
+      namespace: openshift-adp
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: guardrails.example.com
+      kind: GuardrailConfig
+    - group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicy
+    - group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicyBinding
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: user.openshift.io
+      kind: Group
+    - group: config.openshift.io
+      kind: APIServer
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+  roles:
+    - name: readonly
+      description: read-only view for auditors
+      policies:
+        - p, proj:guardrails:readonly, applications, get, guardrails/*, allow
+      groups:
+        - auditors
+        - gitops-operators

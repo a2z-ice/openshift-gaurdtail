@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# App-of-apps that keeps the guardrails in place (self-heal) WITHOUT ever pruning them.
+#   - no resources-finalizer  => deleting this Application does not delete the policies
+#   - prune: false            => removing a file from Git does not delete a live policy
+#                                (a deletion still needs the annotation workflow; Argo CD's SA is not exempt)
+#   - selfHeal: true          => any out-of-band change is reverted within the reconcile interval
+#   - ServerSideApply         => Argo CD owns only the fields it sets; approval annotations added by humans survive
+# Point spec.source.path at the overlay for the current rollout phase.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guardrails
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/owner: platform-engineering
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: guardrails
+  source:
+    repoURL: https://github.com/example-org/openshift-administration.git
+    targetRevision: main
+    path: manifests/overlays/phase3-enforce
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - Prune=false
+      - ServerSideApply=true
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=true
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    - group: "*"
+      kind: "*"
+      jsonPointers:
+        - /metadata/annotations/guardrails.example.com~1delete-request
+        - /metadata/annotations/guardrails.example.com~1delete-requested-by
+        - /metadata/annotations/guardrails.example.com~1delete-approvals
+    - group: user.openshift.io
+      kind: Group
+      jsonPointers:
+        - /users          # membership owned by the IdP group sync, not by Git
+  revisionHistoryLimit: 10

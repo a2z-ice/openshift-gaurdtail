@@ -1,0 +1,18 @@
+# ---------------------------------------------------------------------------
+# guardrails-system: hosts the approval reaper and the break-glass service account.
+# Protected by name in the policy (cannot be deleted without approvals).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+    openshift.io/cluster-monitoring: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    openshift.io/description: "Deletion guardrails: approval reaper, break-glass identity"
+    guardrails.example.com/owner: platform-engineering

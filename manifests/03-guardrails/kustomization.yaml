@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - crd-guardrailconfig.yaml
+  - guardrailconfig-default.yaml
+  - vap-critical-delete.yaml
+  - vap-critical-delete-bindings.yaml
+  - vap-gitops-only-mutation.yaml
+  - vap-rbac-escalation-audit.yaml
+  - reaper-cronjob.yaml

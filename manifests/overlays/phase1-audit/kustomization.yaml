@@ -1,0 +1,35 @@
+# PHASE 1 - AUDIT ONLY. Nothing is blocked. Policies stamp audit annotations, alerts fire, teams learn the workflow.
+# Run for >= 1 week. Exit criteria in docs/10-rollout-plan.md
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-critical-delete-labelled
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Audit"]
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-critical-delete-named
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Audit"]
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-gitops-only-mutation
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Audit"]
+  - target:
+      kind: Application
+      name: guardrails
+    patch: |
+      - op: replace
+        path: /spec/source/path
+        value: manifests/overlays/phase1-audit

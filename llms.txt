@@ -1,0 +1,32 @@
+# OpenShift 4.21 Audit Trail & Critical-Resource Deletion Guardrails
+
+> Production controls for an OpenShift 4.21 cluster with OpenShift GitOps (Argo CD): audit trail to SIEM + Loki, a two-person deletion rule enforced by ValidatingAdmissionPolicy (applies to cluster-admin), red alerts to email + Microsoft Teams, OADP backups, phased rollout. Start with AGENTS.md; it contains every fact an assistant needs.
+
+## Start here
+- [AGENTS.md](AGENTS.md): rules, facts, commands, read map for AI assistants (read this first)
+- [llm/context.yaml](llm/context.yaml): the same facts, machine-readable
+- [llm/memory.md](llm/memory.md): shared durable memory and current state (phase, last test, open risks)
+- [README.md](README.md): human overview with architecture diagrams
+
+## Skills (task procedures, Agent Skills format)
+- [guardrail-delete](.claude/skills/guardrail-delete/SKILL.md): request → approve ×2 → execute a critical deletion
+- [guardrail-investigate](.claude/skills/guardrail-investigate/SKILL.md): who deleted/changed an object (LogQL/SPL)
+- [guardrail-verify](.claude/skills/guardrail-verify/SKILL.md): validate manifests locally and verify a cluster
+- [guardrail-rollout](.claude/skills/guardrail-rollout/SKILL.md): move between phases safely
+- [guardrail-incident](.claude/skills/guardrail-incident/SKILL.md): respond to a guardrail alert
+
+## Design documents
+- [docs/01-threat-model.md](docs/01-threat-model.md): scenarios, layers, residual risks
+- [docs/04-deletion-guardrails.md](docs/04-deletion-guardrails.md): the CEL policy rule by rule
+- [docs/05-argocd-protection.md](docs/05-argocd-protection.md): Argo CD deletion paths and controls
+- [docs/06-alerting-and-notifications.md](docs/06-alerting-and-notifications.md): alert catalogue, Teams + email setup
+- [docs/09-runbooks.md](docs/09-runbooks.md): operational and incident procedures
+- [docs/10-rollout-plan.md](docs/10-rollout-plan.md): phases, exit criteria, rollback
+
+## Optional
+- [docs/02-audit-logging.md](docs/02-audit-logging.md)
+- [docs/03-identity-rbac-hardening.md](docs/03-identity-rbac-hardening.md)
+- [docs/07-backup-and-recovery.md](docs/07-backup-and-recovery.md)
+- [docs/08-github-approval-workflow.md](docs/08-github-approval-workflow.md)
+- [docs/11-testing-and-validation.md](docs/11-testing-and-validation.md)
+- [docs/12-operations-and-compliance.md](docs/12-operations-and-compliance.md)

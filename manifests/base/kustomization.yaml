@@ -1,0 +1,12 @@
+# Base = PHASE 3 (enforce) definitions. Never point Argo CD at base directly; use an overlay.
+# Order matters on first apply: namespaces/groups -> RBAC -> guardrails (CRD before config) -> audit -> alerting -> backup -> argocd.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../00-namespaces-and-groups
+  - ../02-rbac
+  - ../03-guardrails
+  - ../01-audit
+  - ../05-alerting
+  - ../06-backup
+  - ../04-argocd

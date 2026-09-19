@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(oc whoami:*)",
+      "Bash(oc get:*)",
+      "Bash(oc describe:*)",
+      "Bash(oc auth can-i:*)",
+      "Bash(oc api-resources:*)",
+      "Bash(oc explain:*)",
+      "Bash(oc adm node-logs:*)",
+      "Bash(kustomize build:*)",
+      "Bash(yamllint:*)",
+      "Bash(bash -n:*)",
+      "Bash(shellcheck:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git status:*)",
+      "Bash(scripts/verify-install.sh:*)",
+      "Bash(scripts/audit-query.sh:*)",
+      "Bash(logcli:*)"
+    ],
+    "deny": [
+      "Bash(oc delete crd:*)",
+      "Bash(oc delete ns:*)",
+      "Bash(oc delete namespace:*)",
+      "Bash(oc delete validatingadmissionpolicy:*)",
+      "Bash(oc delete validatingadmissionpolicybinding:*)",
+      "Bash(oc delete vap:*)",
+      "Bash(oc delete vapb:*)",
+      "Bash(oc --as=:*)",
+      "Bash(oc --as :*)",
+      "Bash(oc create token breakglass:*)"
+    ]
+  }
+}

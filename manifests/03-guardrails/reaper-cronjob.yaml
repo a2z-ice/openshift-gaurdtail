@@ -1,0 +1,220 @@
+# ---------------------------------------------------------------------------
+# Approval reaper
+# Purpose : CEL in admission has no clock, so approval expiry (GuardrailConfig.spec.approvalTTL)
+#           is enforced by this CronJob: every 10 minutes it scans every protected kind for
+#           guardrails.example.com/delete-approvals entries older than the TTL and REMOVES them.
+#           The policy only lets this identity remove entries, never add any (see V3).
+# Phase   : 1
+# Rollback: oc delete cronjob approval-reaper -n guardrails-system
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: approval-reaper
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-approval-reaper
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
+  - apiGroups: ["guardrails.example.com"]
+    resources: ["guardrailconfigs"]
+    verbs: ["get", "list"]
+  # get/list/patch (NO delete, NO create) on every protected kind
+  - apiGroups: [""]
+    resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["argocds", "applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["user.openshift.io"]
+    resources: ["groups"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["config.openshift.io"]
+    resources: ["apiservers", "oauths"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["loki.grafana.com"]
+    resources: ["lokistacks", "alertingrules", "rulerconfigs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["observability.openshift.io"]
+    resources: ["clusterlogforwarders"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules", "alertmanagerconfigs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["velero.io"]
+    resources: ["schedules", "backupstoragelocations"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["oadp.openshift.io"]
+    resources: ["dataprotectionapplications"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-approval-reaper
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approval-reaper
+subjects:
+  - kind: ServiceAccount
+    name: approval-reaper
+    namespace: guardrails-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: approval-reaper
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+data:
+  # group/version/resource list the reaper scans (cluster-wide)
+  resources.txt: |
+    v1/namespaces
+    v1/secrets
+    v1/configmaps
+    v1/serviceaccounts
+    argoproj.io/v1beta1/argocds
+    argoproj.io/v1alpha1/applications
+    argoproj.io/v1alpha1/applicationsets
+    argoproj.io/v1alpha1/appprojects
+    operators.coreos.com/v1alpha1/subscriptions
+    operators.coreos.com/v1alpha1/clusterserviceversions
+    operators.coreos.com/v1/operatorgroups
+    apiextensions.k8s.io/v1/customresourcedefinitions
+    admissionregistration.k8s.io/v1/validatingadmissionpolicies
+    admissionregistration.k8s.io/v1/validatingadmissionpolicybindings
+    rbac.authorization.k8s.io/v1/clusterroles
+    rbac.authorization.k8s.io/v1/clusterrolebindings
+    user.openshift.io/v1/groups
+    config.openshift.io/v1/apiservers
+    loki.grafana.com/v1/lokistacks
+    loki.grafana.com/v1/alertingrules
+    observability.openshift.io/v1/clusterlogforwarders
+    monitoring.coreos.com/v1/prometheusrules
+    velero.io/v1/schedules
+    velero.io/v1/backupstoragelocations
+    oadp.openshift.io/v1alpha1/dataprotectionapplications
+    batch/v1/cronjobs
+  reap.sh: |
+    #!/usr/bin/env bash
+    # Removes approval entries older than GuardrailConfig.spec.approvalTTL.
+    # Runs as the reaper SA: the admission policy allows it to REMOVE entries only.
+    set -euo pipefail
+    ANN="guardrails.example.com/delete-approvals"
+    TTL_RAW="$(oc get guardrailconfig default -o jsonpath='{.spec.approvalTTL}')"
+    case "$TTL_RAW" in
+      *h) TTL_SEC=$(( ${TTL_RAW%h} * 3600 )) ;;
+      *m) TTL_SEC=$(( ${TTL_RAW%m} * 60 )) ;;
+      *)  echo "unparseable approvalTTL '$TTL_RAW'"; exit 1 ;;
+    esac
+    NOW=$(date -u +%s)
+    echo "reaper start ttl=${TTL_RAW} (${TTL_SEC}s) now=$(date -u -Is)"
+    while read -r GVR; do
+      [[ -z "$GVR" || "$GVR" == \#* ]] && continue
+      # oc get accepts <resource>.<version>.<group>; core group has no group part
+      IFS='/' read -r -a P <<< "$GVR"
+      if [[ ${#P[@]} -eq 2 ]]; then RES="${P[1]}"; else RES="${P[2]}.${P[1]}.${P[0]}"; fi
+      # objects that carry the annotation: "<ns>|<name>|<annotation>"
+      oc get "$RES" --all-namespaces --ignore-not-found \
+        -o go-template='{{range .items}}{{$item := .}}{{with .metadata.annotations}}{{if index . "guardrails.example.com/delete-approvals"}}{{with $item.metadata.namespace}}{{.}}{{end}}|{{$item.metadata.name}}|{{index . "guardrails.example.com/delete-approvals"}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null \
+      | while IFS='|' read -r NS NAME RAW; do
+          [[ -z "$NAME" ]] && continue
+          KEEP=""
+          IFS=',' read -r -a ENTRIES <<< "$RAW"
+          for E in "${ENTRIES[@]}"; do
+            U="${E%%|*}"; TS="${E#*|}"
+            TS_SEC=$(date -u -d "$TS" +%s 2>/dev/null || echo 0)
+            if (( NOW - TS_SEC > TTL_SEC )); then
+              echo "expire ${RES} ${NS:-<cluster>}/${NAME} approver=${U} at=${TS}"
+            else
+              KEEP="${KEEP:+${KEEP},}${E}"
+            fi
+          done
+          if [[ "$KEEP" != "$RAW" ]]; then
+            NSARG=(); [[ -n "$NS" ]] && NSARG=(-n "$NS")
+            if [[ -z "$KEEP" ]]; then
+              oc annotate "${NSARG[@]}" "$RES" "$NAME" "${ANN}-" --overwrite
+            else
+              oc annotate "${NSARG[@]}" "$RES" "$NAME" "${ANN}=${KEEP}" --overwrite
+            fi
+          fi
+        done
+    done < /config/resources.txt
+    echo "reaper done"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: approval-reaper
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: approval-reaper
+        spec:
+          serviceAccountName: approval-reaper
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+              command: ["/bin/bash", "/config/reap.sh"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+          volumes:
+            - name: config
+              configMap:
+                name: approval-reaper
+                defaultMode: 0555

@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# Hardening patch for the default ArgoCD instance created by the OpenShift GitOps operator.
+# Apply with:  oc patch argocd openshift-gitops -n openshift-gitops --type merge -p "$(cat this-file | yq -o=json)"
+# or manage it from Git as a kustomize strategic-merge patch (see kustomization.yaml).
+#
+# What changes and why
+#   spec.rbac           : Argo CD-level RBAC (default readonly; operators cannot delete apps/projects)
+#   spec.sso            : OIDC via the OpenShift OAuth (Dex) so Argo CD identities == cluster identities == audit identities
+#   spec.disableAdmin   : no local 'admin' account (no un-audited shared password)
+#   spec.resourceExclusions: Argo CD never manages/prunes the guardrail policy kinds by accident from unrelated apps
+#   spec.server.insecure=false + route TLS reencrypt
+#   labels/annotations  : marks the instance critical (deletion requires the two-person rule)
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/owner: platform-engineering
+    guardrails.example.com/runbook: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#restore-argo-cd
+spec:
+  disableAdmin: true
+  sso:
+    provider: dex
+    dex:
+      openShiftOAuth: true
+  rbac:
+    defaultPolicy: role:readonly
+    scopes: "[groups]"
+    policy: |
+      p, role:operator, applications, get,      */*, allow
+      p, role:operator, applications, sync,     */*, allow
+      p, role:operator, applications, action/*, */*, allow
+      p, role:operator, applications, override, */*, allow
+      p, role:operator, applications, update,   */*, allow
+      p, role:operator, applications, create,   */*, allow
+      p, role:operator, applications, delete,   */*, deny
+      p, role:operator, applicationsets, *,     */*, allow
+      p, role:operator, applicationsets, delete,*/*, deny
+      p, role:operator, projects, get,          *,   allow
+      p, role:operator, projects, delete,       *,   deny
+      p, role:operator, repositories, *,        *,   allow
+      p, role:operator, clusters, get,          *,   allow
+      p, role:operator, logs, get,              */*, allow
+      p, role:operator, exec, create,           */*, deny
+      g, gitops-operators, role:operator
+      g, platform-admins,  role:admin
+  server:
+    insecure: false
+    route:
+      enabled: true
+      tls:
+        termination: reencrypt
+        insecureEdgeTerminationPolicy: Redirect
+  # Never let an unrelated Application take ownership of (and later prune) guardrail objects.
+  resourceExclusions: |
+    - apiGroups: ["guardrails.example.com"]
+      kinds: ["*"]
+      clusters: ["*"]
+  # Keep the last 10 revisions of every Application for forensic diffs.
+  extraConfig:
+    application.resourceTrackingMethod: annotation
+    controller.diff.server.side: "true"
+    resource.customizations.ignoreDifferences.all: |
+      jsonPointers:
+        - /metadata/annotations/guardrails.example.com~1delete-request
+        - /metadata/annotations/guardrails.example.com~1delete-requested-by
+        - /metadata/annotations/guardrails.example.com~1delete-approvals

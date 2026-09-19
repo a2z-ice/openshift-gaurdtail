@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Break-glass identity.
+# The ONLY non-loopback identity exempt from the two-person rule. Its token is minted on demand
+# (`oc create token breakglass -n guardrails-system --duration=1h`) by TWO people under the
+# vault's dual-control policy - it is never stored in a file. Every request it makes is a P1
+# alert (BreakGlassUsed). It exists so that recovery is possible when approvers are unreachable
+# (e.g. IdP outage), which is the one scenario the two-person rule cannot serve.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: breakglass
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "Dual-control emergency identity. Token minted only via the vault break-glass procedure (docs/09-runbooks.md)."
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-breakglass
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: breakglass
+    namespace: guardrails-system

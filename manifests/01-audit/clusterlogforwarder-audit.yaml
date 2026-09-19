@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# ClusterLogForwarder (Logging 6.x API): audit logs -> SIEM (Splunk HEC) + LokiStack (for alerting).
+#
+#   inputs.audit-all : kubeAPI (kube-apiserver), openshiftAPI (openshift-apiserver + oauth), auditd (node), ovn (network policy audit)
+#   outputs.siem-splunk : primary long-term store. Swap for the `siem-elasticsearch` or `siem-syslog` blocks below.
+#   outputs.loki-audit  : in-cluster, 90-day, used only by the AlertingRules.
+#   Both outputs receive the SAME pipeline so a SIEM outage never blinds the alerts and vice versa.
+#
+# Prereqs (created below): ServiceAccount audit-collector with collect-audit-logs + logging-collector-logs-writer.
+# Secret splunk-hec (key hecToken) comes from the vault; never commit it.
+# Rollback: oc delete clusterlogforwarder audit-forwarder -n openshift-logging   (critical -> needs approvals)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: audit-collector
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-audit-collector-collect-audit-logs
+  labels:
+    guardrails.example.com/critical: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-audit-logs
+subjects:
+  - kind: ServiceAccount
+    name: audit-collector
+    namespace: openshift-logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-audit-collector-logs-writer
+  labels:
+    guardrails.example.com/critical: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logging-collector-logs-writer
+subjects:
+  - kind: ServiceAccount
+    name: audit-collector
+    namespace: openshift-logging
+---
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: audit-forwarder
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  managementState: Managed
+  serviceAccount:
+    name: audit-collector
+  collector:
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { memory: 2Gi }
+    tolerations:
+      - operator: Exists           # collect on control-plane nodes too (that is where the API audit logs live)
+  inputs:
+    - name: audit-all
+      type: audit
+      audit:
+        sources: [kubeAPI, openshiftAPI, auditd, ovn]
+  filters:
+    - name: cluster-label
+      type: openshiftLabels
+      openshiftLabels:
+        cluster: prod-eu-1              # REPLACE: unique cluster identifier for the SIEM
+        environment: production
+  outputs:
+    - name: siem-splunk
+      type: splunk
+      splunk:
+        url: https://splunk-hec.example.com:8088
+        index: openshift_audit
+        source: openshift-audit
+        authentication:
+          token:
+            secretName: splunk-hec
+            key: hecToken
+      tls:
+        ca:
+          configMapName: splunk-ca           # optional: CA bundle for the HEC endpoint (key ca-bundle.crt)
+          key: ca-bundle.crt
+      rateLimit:
+        maxRecordsPerSecond: 5000
+    - name: loki-audit
+      type: lokiStack
+      lokiStack:
+        target:
+          name: logging-loki
+          namespace: openshift-logging
+        authentication:
+          token:
+            from: serviceAccount
+      tls:
+        ca:
+          key: service-ca.crt
+          configMapName: openshift-service-ca.crt
+  # --- alternative SIEM outputs (uncomment ONE and add it to outputRefs) ---
+  # - name: siem-elasticsearch
+  #   type: elasticsearch
+  #   elasticsearch:
+  #     url: https://elastic.example.com:9200
+  #     version: 8
+  #     index: '{.log_type||"none"}-audit-write'
+  #     authentication:
+  #       username: { secretName: elastic-creds, key: username }
+  #       password: { secretName: elastic-creds, key: password }
+  #   tls:
+  #     ca: { configMapName: elastic-ca, key: ca-bundle.crt }
+  # - name: siem-syslog
+  #   type: syslog
+  #   syslog:
+  #     url: tls://siem-syslog.example.com:6514
+  #     rfc: RFC5424
+  #     facility: security
+  #     severity: informational
+  #     appName: openshift-audit
+  #   tls:
+  #     ca: { configMapName: siem-ca, key: ca-bundle.crt }
+  pipelines:
+    - name: audit-to-siem-and-loki
+      inputRefs: [audit-all]
+      filterRefs: [cluster-label]
+      outputRefs: [siem-splunk, loki-audit]

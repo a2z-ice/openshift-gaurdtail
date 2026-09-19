@@ -1,0 +1,20 @@
+# PHASE 4 - ENFORCE GitOps-only mutation as well: humans can no longer hand-edit critical objects.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: ValidatingAdmissionPolicyBinding
+      name: guardrails-gitops-only-mutation
+    patch: |
+      - op: replace
+        path: /spec/validationActions
+        value: ["Deny", "Audit"]
+  - target:
+      kind: Application
+      name: guardrails
+    patch: |
+      - op: replace
+        path: /spec/source/path
+        value: manifests/overlays/phase4-gitops-only

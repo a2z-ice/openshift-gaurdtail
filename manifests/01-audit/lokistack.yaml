@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# LokiStack for audit-log alerting (the SIEM remains the long-term system of record).
+#   size 1x.small  : ~3 ingesters/queriers; sufficient for audit + infra on a mid-size cluster.
+#                    Use 1x.medium above ~150 nodes or if audit volume > 100 GB/day.
+#   audit retention: 90 days in Loki (matches the alert investigation window); the SIEM keeps 1-7 years.
+#   rules.enabled  : the operator wires the ruler to the platform Alertmanager in openshift-logging tenant mode
+#                    and only loads AlertingRules from namespaces/objects matching the selectors below.
+# ---------------------------------------------------------------------------
+apiVersion: loki.grafana.com/v1
+kind: LokiStack
+metadata:
+  name: logging-loki
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  size: 1x.small
+  storage:
+    schemas:
+      - version: v13
+        effectiveDate: "2024-10-01"
+    secret:
+      name: logging-loki-s3
+      type: s3
+  storageClassName: gp3-csi          # REPLACE with your default RWO storage class
+  tenants:
+    mode: openshift-logging
+  limits:
+    global:
+      retention:
+        days: 30
+      ingestion:
+        ingestionRate: 20
+        ingestionBurstSize: 30
+    tenants:
+      audit:
+        retention:
+          days: 90
+        ingestion:
+          ingestionRate: 30
+          ingestionBurstSize: 40
+  rules:
+    enabled: true
+    selector:
+      matchLabels:
+        openshift.io/log-alerting: "true"
+    namespaceSelector:
+      matchLabels:
+        openshift.io/cluster-monitoring: "true"
+  template:
+    ruler:
+      replicas: 2

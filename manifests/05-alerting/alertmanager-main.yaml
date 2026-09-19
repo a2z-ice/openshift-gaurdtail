@@ -1,0 +1,158 @@
+# ---------------------------------------------------------------------------
+# Platform Alertmanager configuration (openshift-monitoring/alertmanager-main secret).
+#
+# Install:
+#   oc -n openshift-monitoring create secret generic alertmanager-main \
+#      --from-file=alertmanager.yaml=alertmanager.yaml \
+#      --from-file=guardrail.tmpl=guardrail.tmpl \
+#      --dry-run=client -o yaml | oc replace -f -
+# (or render the two keys through the vault / ESO; the Teams workflow URL and SMTP password are secrets)
+#
+# Receivers
+#   guardrail-red   : email + Microsoft Teams (msteamsv2 = Power Automate "Workflows" webhook, Alertmanager >= 0.28;
+#                     OCP 4.21 ships 0.29.0). No grouping delay, repeats every 30 min until resolved.
+#   guardrail-info  : Teams only, batched.
+#   default         : your existing on-call receiver (kept as-is).
+#
+# Keep everything you already have in your alertmanager.yaml and ADD the guardrail receivers/routes.
+# The secret itself is critical: label it once created
+#   oc -n openshift-monitoring label secret alertmanager-main guardrails.example.com/critical=true
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-main
+  namespace: openshift-monitoring
+  labels:
+    guardrails.example.com/critical: "true"
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+      smtp_smarthost: smtp.example.com:587
+      smtp_from: openshift-alerts@example.com
+      smtp_auth_username: openshift-alerts@example.com
+      smtp_auth_password: REPLACE_FROM_VAULT
+      smtp_require_tls: true
+    templates:
+      - /etc/alertmanager/config/guardrail.tmpl
+    inhibit_rules:
+      - source_matchers: [severity="critical"]
+        target_matchers: [severity="warning"]
+        equal: [alertname, namespace]
+      # a confirmed deletion supersedes the "denied" noise from the same object
+      - source_matchers: [alertname="CriticalResourceDeleted"]
+        target_matchers: [alertname="CriticalResourceDeleteDenied"]
+        equal: [objectRef_resource, objectRef_namespace, objectRef_name]
+    route:
+      receiver: default
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        # ---- guardrail RED path: critical, immediate, both channels, keeps nagging until resolved
+        - matchers:
+            - guardrail="true"
+            - severity="critical"
+          receiver: guardrail-red
+          group_by: [alertname, objectRef_resource, objectRef_namespace, objectRef_name, user_username]
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 30m
+          continue: true
+        # ---- guardrail warnings: Teams, quick but batched
+        - matchers:
+            - guardrail="true"
+            - severity="warning"
+          receiver: guardrail-teams-only
+          group_by: [alertname, objectRef_resource, objectRef_namespace, objectRef_name]
+          group_wait: 15s
+          group_interval: 2m
+          repeat_interval: 4h
+          continue: true
+        # ---- informational: approval activity, batched into a single Teams post
+        - matchers:
+            - guardrail="true"
+            - severity="info"
+          receiver: guardrail-teams-only
+          group_by: [alertname, objectRef_namespace, objectRef_name]
+          group_wait: 1m
+          group_interval: 10m
+          repeat_interval: 24h
+        # ---- also copy every guardrail alert to the normal on-call path so nothing is lost if Teams is down
+        - matchers:
+            - guardrail="true"
+          receiver: default
+    receivers:
+      - name: default
+        # REPLACE with your existing on-call receiver (PagerDuty / Opsgenie / email)
+        email_configs:
+          - to: platform-oncall@example.com
+            send_resolved: true
+      - name: guardrail-red
+        email_configs:
+          - to: platform-oncall@example.com, security-oncall@example.com
+            send_resolved: true
+            headers:
+              Subject: '{{ template "guardrail.email.subject" . }}'
+              X-Priority: "1"
+              Importance: high
+            html: '{{ template "guardrail.email.html" . }}'
+        msteamsv2_configs:
+          - send_resolved: true
+            webhook_url: https://REPLACE.logic.azure.com:443/workflows/REPLACE/triggers/manual/paths/invoke?api-version=2016-06-01&sig=REPLACE
+            title: '{{ template "guardrail.teams.title" . }}'
+            text: '{{ template "guardrail.teams.text" . }}'
+      - name: guardrail-teams-only
+        msteamsv2_configs:
+          - send_resolved: true
+            webhook_url: https://REPLACE.logic.azure.com:443/workflows/REPLACE/triggers/manual/paths/invoke?api-version=2016-06-01&sig=REPLACE
+            title: '{{ template "guardrail.teams.title" . }}'
+            text: '{{ template "guardrail.teams.text" . }}'
+  guardrail.tmpl: |
+    {{ define "guardrail.severity.icon" -}}
+    {{ if eq .CommonLabels.severity "critical" }}🔴{{ else if eq .CommonLabels.severity "warning" }}🟠{{ else }}🔵{{ end }}
+    {{- end }}
+
+    {{ define "guardrail.email.subject" -}}
+    [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ template "guardrail.severity.icon" . }} {{ .CommonLabels.alertname }} - {{ .CommonLabels.objectRef_resource }} {{ .CommonLabels.objectRef_namespace }}/{{ .CommonLabels.objectRef_name }}
+    {{- end }}
+
+    {{ define "guardrail.email.html" -}}
+    <html><body style="font-family:Segoe UI,Arial,sans-serif">
+    <h2 style="color:{{ if eq .CommonLabels.severity "critical" }}#b00020{{ else }}#b36b00{{ end }}">{{ template "guardrail.severity.icon" . }} {{ .CommonLabels.alertname }} ({{ .Status | toUpper }})</h2>
+    {{ range .Alerts -}}
+    <p><b>{{ .Annotations.summary }}</b></p>
+    <p>{{ .Annotations.description }}</p>
+    <table border="1" cellpadding="4" style="border-collapse:collapse">
+      <tr><td>Actor</td><td>{{ .Labels.user_username }}{{ if .Labels.impersonatedUser_username }} (impersonating {{ .Labels.impersonatedUser_username }}){{ end }}</td></tr>
+      <tr><td>Resource</td><td>{{ .Labels.objectRef_resource }} {{ .Labels.objectRef_namespace }}/{{ .Labels.objectRef_name }}</td></tr>
+      <tr><td>Cluster</td><td>{{ .Labels.openshift_labels_cluster }}</td></tr>
+      <tr><td>Started</td><td>{{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}</td></tr>
+      <tr><td>Runbook</td><td><a href="{{ .Annotations.runbook_url }}">{{ .Annotations.runbook_url }}</a></td></tr>
+    </table>
+    {{ end -}}
+    </body></html>
+    {{- end }}
+
+    {{ define "guardrail.teams.title" -}}
+    {{ template "guardrail.severity.icon" . }} [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} - {{ .CommonLabels.objectRef_resource }} {{ .CommonLabels.objectRef_namespace }}/{{ .CommonLabels.objectRef_name }}
+    {{- end }}
+
+    {{ define "guardrail.teams.text" -}}
+    {{ range .Alerts -}}
+    **{{ .Annotations.summary }}**
+
+    {{ .Annotations.description }}
+
+    - **Actor:** {{ .Labels.user_username }}{{ if .Labels.impersonatedUser_username }} (impersonating {{ .Labels.impersonatedUser_username }}){{ end }}
+    - **Resource:** {{ .Labels.objectRef_resource }} {{ .Labels.objectRef_namespace }}/{{ .Labels.objectRef_name }}
+    - **Cluster:** {{ .Labels.openshift_labels_cluster }}
+    - **Severity:** {{ .Labels.severity }}   **Team:** {{ .Labels.team }}
+    - **Started:** {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
+    - **Runbook:** {{ .Annotations.runbook_url }}
+
+    {{ end -}}
+    {{- end }}

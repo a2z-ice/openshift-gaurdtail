@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# OADP (Velero) DataProtectionApplication. Requires the OADP operator in openshift-adp.
+# Backup target bucket must be DIFFERENT from the Loki bucket and have Object Lock enabled.
+# Credentials secret `cloud-credentials` (key `cloud`) comes from the vault.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-adp
+  namespace: openshift-adp
+spec:
+  targetNamespaces: [openshift-adp]
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: redhat-oadp-operator
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  channel: stable
+  name: redhat-oadp-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+---
+apiVersion: oadp.openshift.io/v1alpha1
+kind: DataProtectionApplication
+metadata:
+  name: gitops-dpa
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  configuration:
+    velero:
+      defaultPlugins: [openshift, aws, csi, kubevirt]
+      resourceTimeout: 10m
+      logLevel: info
+    nodeAgent:
+      enable: true
+      uploaderType: kopia
+  backupLocations:
+    - velero:
+        provider: aws
+        default: true
+        credential:
+          name: cloud-credentials
+          key: cloud
+        objectStorage:
+          bucket: ocp-prod-eu-1-oadp          # REPLACE
+          prefix: velero
+        config:
+          region: eu-west-1                  # REPLACE
+          # s3Url / s3ForcePathStyle for non-AWS S3 (ODF/MinIO/NetApp)
+  snapshotLocations:
+    - velero:
+        provider: aws
+        config:
+          region: eu-west-1

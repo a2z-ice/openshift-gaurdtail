@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# ALTERNATIVE (only if your organisation forbids editing the platform alertmanager-main secret).
+# Limitations you must accept with this path:
+#   * AlertmanagerConfig objects are namespaced and only match alerts carrying namespace=<their namespace>.
+#     Loki ruler alerts carry no namespace label by default, so add `namespace: openshift-logging` to every
+#     AlertingRule's labels and create this object in openshift-logging.
+#   * Requires  enableUserAlertmanagerConfig: true  in the cluster-monitoring-config ConfigMap (alertmanagerMain section).
+#   * Metrics alerts from openshift-gitops need a second copy of this object in that namespace.
+# The platform secret path (alertmanager-main.yaml) is the recommended one.
+# ---------------------------------------------------------------------------
+apiVersion: monitoring.coreos.com/v1beta1
+kind: AlertmanagerConfig
+metadata:
+  name: guardrails
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  route:
+    receiver: guardrail-red
+    groupBy: [alertname, objectRef_resource, objectRef_namespace, objectRef_name]
+    groupWait: 0s
+    groupInterval: 1m
+    repeatInterval: 30m
+    matchers:
+      - name: guardrail
+        value: "true"
+        matchType: "="
+  receivers:
+    - name: guardrail-red
+      emailConfigs:
+        - to: platform-oncall@example.com
+          from: openshift-alerts@example.com
+          smarthost: smtp.example.com:587
+          authUsername: openshift-alerts@example.com
+          authPassword:
+            name: guardrail-smtp
+            key: password
+          requireTLS: true
+          sendResolved: true
+      msteamsv2Configs:
+        - webhookURL:
+            name: guardrail-teams-webhook
+            key: url
+          sendResolved: true
+          title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.description }}{{ "\n" }}{{ end }}'

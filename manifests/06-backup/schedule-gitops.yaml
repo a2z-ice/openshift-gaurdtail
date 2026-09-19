@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Backup schedules.
+#   gitops-6h         : everything in the GitOps + guardrail namespaces, incl. related cluster-scoped objects
+#                        (Argo CD CR, Applications, AppProjects, repo/cluster secrets, operator Subscription/CSV).
+#   guardrails-daily  : cluster-scoped guardrail objects (policies, bindings, config, RBAC, groups, CRDs).
+# RPO = 6h for Argo CD state; Git remains the primary source for Application definitions.
+# Restore drill: quarterly, see docs/07-backup-and-recovery.md
+# ---------------------------------------------------------------------------
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: gitops-6h
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  schedule: "15 */6 * * *"
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 720h0m0s                # 30 days
+    includedNamespaces:
+      - openshift-gitops
+      - openshift-gitops-operator
+      - guardrails-system
+    includeClusterResources: true
+    snapshotVolumes: false       # Argo CD state is in Git + CRs; redis is a cache
+    defaultVolumesToFsBackup: false
+    excludedResources:
+      - pods
+      - replicasets
+      - events
+      - events.events.k8s.io
+    storageLocation: gitops-dpa-1
+---
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: guardrails-daily
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  schedule: "45 1 * * *"
+  template:
+    ttl: 2160h0m0s               # 90 days
+    includeClusterResources: true
+    includedResources:
+      - validatingadmissionpolicies.admissionregistration.k8s.io
+      - validatingadmissionpolicybindings.admissionregistration.k8s.io
+      - guardrailconfigs.guardrails.example.com
+      - customresourcedefinitions.apiextensions.k8s.io
+      - clusterroles.rbac.authorization.k8s.io
+      - clusterrolebindings.rbac.authorization.k8s.io
+      - groups.user.openshift.io
+      - apiservers.config.openshift.io
+      - clusterlogforwarders.observability.openshift.io
+      - lokistacks.loki.grafana.com
+      - alertingrules.loki.grafana.com
+      - prometheusrules.monitoring.coreos.com
+    labelSelector:
+      matchLabels:
+        guardrails.example.com/critical: "true"
+    storageLocation: gitops-dpa-1

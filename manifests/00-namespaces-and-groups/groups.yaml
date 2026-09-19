@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# Authorisation groups.
+# In production these groups are populated by the IdP (LDAP group sync / OIDC claims);
+# the manifests below are the BOOTSTRAP shape and document the intended membership.
+# If you use `oc adm group sync`, keep the names and let the sync own `users:`.
+# Membership changes are flagged by guardrails-rbac-escalation-audit and alerted.
+# ---------------------------------------------------------------------------
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
+  name: gitops-deletion-approvers
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/owner: platform-engineering
+    guardrails.example.com/description: "May APPROVE deletion of critical resources. Minimum 4 members across 2 teams so 2 approvers are always reachable."
+users:
+  - approver1@example.com
+  - approver2@example.com
+  - approver3@example.com
+  - approver4@example.com
+---
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
+  name: gitops-deletion-requesters
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "May OPEN a deletion request on a critical resource (approvers may also request)."
+users:
+  - operator1@example.com
+  - operator2@example.com
+---
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
+  name: gitops-operators
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "Day-2 Argo CD administrators: full Argo CD UI/CLI rights, no delete on critical resources."
+users:
+  - operator1@example.com
+  - operator2@example.com
+---
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
+  name: platform-admins
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "cluster-admin. Membership is TIME-BOXED via the IdP (PIM/JIT). Empty by default."
+users: []
+---
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
+  name: auditors
+  labels:
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "Read-only cluster view plus audit log access in Loki/SIEM."
+users:
+  - auditor1@example.com

@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# API server audit policy.
+#   WriteRequestBodies: metadata for every request + request/response bodies for
+#   create/update/patch/delete. Secrets, ConfigMaps, Routes, OAuth clients/tokens and
+#   similar security-sensitive kinds stay at Metadata level in Red Hat's profile
+#   (verify: oc get cm -n openshift-kube-apiserver kube-apiserver-audit-policies -o yaml).
+#   Rationale: an investigation needs "what exactly was changed"; reads are already
+#   attributed at Metadata level (who read which object), which is enough for
+#   "who looked at secret X" without copying secret contents into the log stream.
+#   AllRequestBodies is NOT used: it multiplies volume and writes response bodies of
+#   GET/LIST (i.e. secret values) into the audit logs.
+#
+# customRules: first match wins, evaluated top-down. Non-human service accounts from
+#   openshift-gitops and the guardrails namespace also log bodies so that GitOps-driven
+#   changes are fully reconstructible.
+#
+# This object is critical (config.openshift.io group): downgrading the profile requires the
+# two-person rule. Changes roll the kube-apiserver pods one at a time (expect ~10-15 min).
+# Rollback: oc patch apiserver cluster --type merge -p '{"spec":{"audit":{"profile":"Default"}}}'  (needs approvals)
+# ---------------------------------------------------------------------------
+apiVersion: config.openshift.io/v1
+kind: APIServer
+metadata:
+  name: cluster
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  audit:
+    profile: WriteRequestBodies
+    customRules:
+      - group: system:authenticated:oauth        # every human logged in through the IdP
+        profile: WriteRequestBodies
+      - group: system:serviceaccounts:openshift-gitops
+        profile: WriteRequestBodies
+      - group: system:serviceaccounts:guardrails-system
+        profile: WriteRequestBodies

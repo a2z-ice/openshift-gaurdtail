@@ -1,0 +1,5 @@
+---
+description: OpenShift guardrails repository operating rules
+alwaysApply: true
+---
+Read AGENTS.md first (hard rules, facts, commands, read map). Task procedures: .claude/skills/*/SKILL.md. Shared memory: llm/memory.md. Never weaken the deletion guardrail (exemptUsers, minApprovers, validationActions, finalizers, prune) or bypass the three-person deletion workflow; every manifest change is a two-approval PR.

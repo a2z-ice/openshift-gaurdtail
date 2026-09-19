@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Argo CD (application-level) RBAC. Applied through the ArgoCD CR (spec.rbac), NOT by editing
+# argocd-rbac-cm directly (the operator owns that ConfigMap). See 04-argocd/argocd-cr-hardening-patch.yaml
+# This file documents the policy that patch embeds so reviewers can diff it in isolation.
+#
+#   role:readonly  (default for every authenticated user)
+#   role:operator  gitops-operators: sync/refresh/override apps, manage repos, NO delete of apps/projects
+#   role:admin     platform-admins only (time-boxed), still subject to the admission guardrail
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-policy-reference
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: guardrails
+data:
+  policy.default: role:readonly
+  scopes: "[groups]"
+  policy.csv: |
+    p, role:operator, applications, get,      */*, allow
+    p, role:operator, applications, sync,     */*, allow
+    p, role:operator, applications, action/*, */*, allow
+    p, role:operator, applications, override, */*, allow
+    p, role:operator, applications, update,   */*, allow
+    p, role:operator, applications, create,   */*, allow
+    p, role:operator, applications, delete,   */*, deny
+    p, role:operator, applicationsets, *,     */*, allow
+    p, role:operator, applicationsets, delete,*/*, deny
+    p, role:operator, projects, get,          *,   allow
+    p, role:operator, projects, delete,       *,   deny
+    p, role:operator, repositories, *,        *,   allow
+    p, role:operator, clusters, get,          *,   allow
+    p, role:operator, logs, get,              */*, allow
+    p, role:operator, exec, create,           */*, deny
+    g, gitops-operators, role:operator
+    g, platform-admins,  role:admin

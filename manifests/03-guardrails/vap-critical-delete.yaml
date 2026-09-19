@@ -1,0 +1,277 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-critical-delete
+#
+# THE core control. Enforced inside kube-apiserver (no webhook, no operator),
+# applies to every authenticated identity including cluster-admin/system:masters.
+#
+# What it does
+#   DELETE of a critical resource  -> denied unless the object carries a deletion
+#                                     request AND >= minApprovers DISTINCT approvals
+#                                     from members of the approver group, none of
+#                                     whom is the requester or the executor.
+#   UPDATE of a critical resource  -> the guardrail annotations are integrity-checked:
+#                                     * a request can only be opened by its own author
+#                                       (delete-requested-by == request.userInfo.username)
+#                                     * an approval entry can only be appended by the
+#                                       approver it names, one at a time, with nothing
+#                                       else in the object changing in the same request
+#                                     * any change to the request text/author wipes approvals
+#                                     * the reaper may only REMOVE entries
+#                                     * the critical label cannot be removed without the
+#                                       same approvals a deletion needs
+#
+# "Critical" =  label guardrails.example.com/critical=true on the object (binding A, objectSelector)
+#            OR one of the hard-coded name/kind rules in variables.nameCritical (binding B)
+#
+# Annotation contract (prefix guardrails.example.com/)
+#   delete-request        "<change-ticket>: <reason>"                (requester)
+#   delete-requested-by   "<username>"                               (requester; must equal caller)
+#   delete-approvals      "<user>|<RFC3339 UTC>,<user>|<RFC3339 UTC>" (approvers; one entry per request)
+#
+# Phase   : 1 = validationActions [Audit]; 2 = [Warn, Audit]; 3 = [Deny, Audit]  (set on the bindings)
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-critical-delete-labelled guardrails-critical-delete-named
+#           (once enforced this itself needs approvals or the break-glass SA - by design)
+# Notes   : status.typeChecking WILL list warnings such as "undefined field 'spec'" because the
+#           policy matches many kinds. Warnings are informational; evaluation uses dynamic typing.
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-critical-delete
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["argocds", "applications", "applicationsets", "appprojects"]
+      - apiGroups: ["operators.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+      - apiGroups: ["olm.operatorframework.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterextensions"]
+      - apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["customresourcedefinitions"]
+      - apiGroups: ["guardrails.example.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["guardrailconfigs"]
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings", "validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["groups"]
+      - apiGroups: ["config.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["apiservers", "oauths"]
+      - apiGroups: ["loki.grafana.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["lokistacks", "alertingrules", "rulerconfigs"]
+      - apiGroups: ["observability.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterlogforwarders"]
+      - apiGroups: ["monitoring.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["prometheusrules", "alertmanagerconfigs"]
+      - apiGroups: ["velero.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["schedules", "backupstoragelocations"]
+      - apiGroups: ["oadp.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["dataprotectionapplications"]
+      - apiGroups: ["batch"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["cronjobs"]
+  variables:
+    # ---- reference state: ALWAYS the object as it was before the request (UPDATE and DELETE both have oldObject)
+    - name: oldLabels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: oldAnn
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: newLabels
+      expression: "request.operation == 'UPDATE' && has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: newAnn
+      expression: "request.operation == 'UPDATE' && has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    # ---- what counts as critical
+    - name: labelCritical
+      expression: "'guardrails.example.com/critical' in variables.oldLabels && variables.oldLabels['guardrails.example.com/critical'] == 'true'"
+    - name: nameCritical
+      expression: >-
+        (request.resource.group == '' && request.resource.resource == 'namespaces'
+          && oldObject.metadata.name in ['openshift-gitops', 'openshift-gitops-operator', 'guardrails-system', 'openshift-logging', 'openshift-adp'])
+        || (request.resource.group == 'apiextensions.k8s.io'
+          && oldObject.spec.group in ['argoproj.io', 'guardrails.example.com', 'loki.grafana.com', 'observability.openshift.io', 'velero.io', 'oadp.openshift.io'])
+        || (request.resource.group == 'admissionregistration.k8s.io' && oldObject.metadata.name.startsWith('guardrails-'))
+        || (request.resource.group == 'guardrails.example.com')
+        || (request.resource.group == 'user.openshift.io'
+          && oldObject.metadata.name in ['platform-admins', 'gitops-deletion-approvers', 'gitops-deletion-requesters'])
+        || (request.resource.group == 'rbac.authorization.k8s.io' && oldObject.metadata.name.startsWith('guardrails-'))
+        || (request.resource.group == 'config.openshift.io')
+        || (request.resource.group == 'argoproj.io' && request.resource.resource == 'argocds' && has(request.namespace) && request.namespace == 'openshift-gitops')
+        || (request.resource.group == 'operators.coreos.com' && has(request.namespace) && request.namespace == 'openshift-gitops-operator')
+        || (request.resource.group == 'olm.operatorframework.io' && oldObject.metadata.name.contains('gitops'))
+    - name: isCritical
+      expression: "variables.labelCritical || variables.nameCritical"
+    # ---- who is asking
+    - name: isExempt
+      expression: "request.userInfo.username in params.spec.exemptUsers"
+    - name: isReaper
+      expression: "request.userInfo.username in params.spec.reaperUsers"
+    - name: isApprover
+      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups)"
+    - name: isRequester
+      expression: "has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.requesterGroups || g in params.spec.approverGroups)"
+    # ---- guardrail annotations, old and new
+    - name: oldRequest
+      expression: "'guardrails.example.com/delete-request' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-request'] : ''"
+    - name: newRequest
+      expression: "'guardrails.example.com/delete-request' in variables.newAnn ? variables.newAnn['guardrails.example.com/delete-request'] : ''"
+    - name: oldRequestedBy
+      expression: "'guardrails.example.com/delete-requested-by' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-requested-by'] : ''"
+    - name: newRequestedBy
+      expression: "'guardrails.example.com/delete-requested-by' in variables.newAnn ? variables.newAnn['guardrails.example.com/delete-requested-by'] : ''"
+    - name: oldApprovalsRaw
+      expression: "'guardrails.example.com/delete-approvals' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-approvals'] : ''"
+    - name: newApprovalsRaw
+      expression: "'guardrails.example.com/delete-approvals' in variables.newAnn ? variables.newAnn['guardrails.example.com/delete-approvals'] : ''"
+    - name: oldApprovals
+      expression: "variables.oldApprovalsRaw == '' ? [] : variables.oldApprovalsRaw.split(',')"
+    - name: newApprovals
+      expression: "variables.newApprovalsRaw == '' ? [] : variables.newApprovalsRaw.split(',')"
+    - name: oldApprovers
+      expression: "variables.oldApprovals.map(e, e.split('|')[0])"
+    - name: addedApprovals
+      expression: "variables.newApprovals.filter(e, !(e in variables.oldApprovals))"
+    - name: removedApprovals
+      expression: "variables.oldApprovals.filter(e, !(e in variables.newApprovals))"
+    - name: approvalsUnchanged
+      expression: "variables.newApprovalsRaw == variables.oldApprovalsRaw"
+    - name: requestUnchanged
+      expression: "variables.newRequestedBy == variables.oldRequestedBy && variables.newRequest == variables.oldRequest"
+    - name: oldApproversDistinct
+      expression: "variables.oldApprovers.size() <= 32 && variables.oldApprovers.all(u, variables.oldApprovers.filter(x, x == u).size() == 1)"
+    # ---- the two-person rule, evaluated on the PRE-request state
+    - name: deletionApproved
+      expression: >-
+        variables.oldRequestedBy != '' && variables.oldRequest != ''
+        && variables.oldApprovers.size() >= params.spec.minApprovers
+        && variables.oldApproversDistinct
+        && !(variables.oldRequestedBy in variables.oldApprovers)
+        && (params.spec.executorMayBeApprover || !(request.userInfo.username in variables.oldApprovers))
+    - name: newLabelCritical
+      expression: "'guardrails.example.com/critical' in variables.newLabels && variables.newLabels['guardrails.example.com/critical'] == 'true'"
+    # ---- "nothing but guardrail annotations changed" (prevents smuggling a spec change into an approval)
+    - name: nonGuardrailAnnotationsUnchanged
+      expression: >-
+        variables.newAnn.all(k, k.startsWith('guardrails.example.com/delete-') || (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k]))
+        && variables.oldAnn.all(k, k.startsWith('guardrails.example.com/delete-') || k in variables.newAnn)
+    - name: payloadUnchanged
+      expression: >-
+        request.operation != 'UPDATE' ||
+        ( variables.newLabels == variables.oldLabels
+          && has(object.spec) == has(oldObject.spec) && (!has(object.spec) || object.spec == oldObject.spec)
+          && has(object.data) == has(oldObject.data) && (!has(object.data) || object.data == oldObject.data)
+          && has(object.rules) == has(oldObject.rules) && (!has(object.rules) || object.rules == oldObject.rules)
+          && has(object.subjects) == has(oldObject.subjects) && (!has(object.subjects) || object.subjects == oldObject.subjects)
+          && has(object.roleRef) == has(oldObject.roleRef) && (!has(object.roleRef) || object.roleRef == oldObject.roleRef)
+          && has(object.users) == has(oldObject.users) && (!has(object.users) || object.users == oldObject.users)
+          && has(object.webhooks) == has(oldObject.webhooks) && (!has(object.webhooks) || object.webhooks == oldObject.webhooks) )
+    - name: onlyGuardrailAnnotationsChanged
+      expression: "variables.payloadUnchanged && variables.nonGuardrailAnnotationsUnchanged"
+  validations:
+    # V1 - DELETE needs the two-person rule satisfied
+    - expression: >-
+        !variables.isCritical || variables.isExempt || request.operation != 'DELETE' || variables.deletionApproved
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL DENIED: deleting critical ' + request.resource.resource + ' '
+        + (has(request.namespace) ? request.namespace + '/' : '') + request.name
+        + ' requires a delete-request and at least ' + string(params.spec.minApprovers)
+        + ' distinct approvals from ' + params.spec.approverGroups.join(',')
+        + ' (found ' + string(variables.oldApprovers.size()) + ', requested-by=' + variables.oldRequestedBy
+        + ', executor may not be an approver). Runbook: ' + params.spec.runbookURL
+    # V2 - the critical label may not be removed unless a deletion would also have been allowed
+    - expression: >-
+        !variables.isCritical || variables.isExempt || request.operation != 'UPDATE'
+        || !variables.labelCritical || variables.newLabelCritical || variables.deletionApproved
+      reason: Forbidden
+      message: "GUARDRAIL DENIED: removing the guardrails.example.com/critical label requires the same approvals as a deletion."
+    # V3 - approvals integrity
+    - expression: >-
+        !variables.isCritical || variables.isExempt || request.operation != 'UPDATE'
+        || variables.approvalsUnchanged
+        || variables.newApprovals.size() == 0
+        || (variables.isReaper && variables.addedApprovals.size() == 0 && variables.requestUnchanged && variables.onlyGuardrailAnnotationsChanged)
+        || ( variables.newApprovals.size() <= 32
+             && variables.addedApprovals.size() == 1
+             && variables.removedApprovals.size() == 0
+             && variables.newApprovals.size() == variables.oldApprovals.size() + 1
+             && variables.isApprover
+             && variables.addedApprovals[0].matches('^[^|,]+\\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
+             && variables.addedApprovals[0].split('|')[0] == request.userInfo.username
+             && !(request.userInfo.username in variables.oldApprovers)
+             && variables.newRequestedBy != '' && variables.newRequest != ''
+             && request.userInfo.username != variables.newRequestedBy
+             && variables.requestUnchanged
+             && variables.onlyGuardrailAnnotationsChanged )
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by ' + request.userInfo.username
+        + '. Rules: append exactly one entry "<your-username>|<RFC3339 UTC>", be a member of ' + params.spec.approverGroups.join(',')
+        + ', not be the requester, not approve twice, change nothing else in the object. Clearing the annotation is always allowed.'
+    # V4 - request integrity (author == caller, author in requester groups, any change resets approvals, nothing else changes)
+    - expression: >-
+        !variables.isCritical || variables.isExempt || request.operation != 'UPDATE'
+        || variables.requestUnchanged
+        || ( variables.newApprovals.size() == 0
+             && variables.onlyGuardrailAnnotationsChanged
+             && ( variables.newRequestedBy == ''
+                  || (variables.newRequestedBy == request.userInfo.username && variables.isRequester && variables.newRequest != '') ) )
+      reason: Forbidden
+      messageExpression: >-
+        'GUARDRAIL DENIED: invalid deletion request change by ' + request.userInfo.username
+        + '. delete-requested-by must equal your username, you must be in ' + (params.spec.requesterGroups + params.spec.approverGroups).join(',')
+        + ', delete-request must be non-empty, approvals must be empty when the request changes, and nothing else may change.'
+  auditAnnotations:
+    # Emitted for every evaluated request on a critical object, allowed or denied. Key in the audit event:
+    #   annotations["guardrails-critical-delete/decision"]
+    - key: decision
+      valueExpression: >-
+        variables.isCritical
+        ? ('op=' + request.operation + ' user=' + request.userInfo.username
+           + ' groups=' + (has(request.userInfo.groups) ? request.userInfo.groups.join('|') : '')
+           + ' requestedBy=' + variables.oldRequestedBy
+           + ' approvers=' + variables.oldApprovers.join('|')
+           + ' approved=' + string(variables.deletionApproved)
+           + ' exempt=' + string(variables.isExempt))
+        : null

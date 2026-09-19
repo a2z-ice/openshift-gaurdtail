@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# GuardrailConfig "default" - the ONLY instance; all policy bindings reference it.
+# Phase   : 1
+# Rollback: not applicable; edit values via PR (2 reviewers) - enforced by the policies themselves.
+# ---------------------------------------------------------------------------
+apiVersion: guardrails.example.com/v1alpha1
+kind: GuardrailConfig
+metadata:
+  name: default
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/owner: platform-engineering
+spec:
+  minApprovers: 2
+  executorMayBeApprover: false
+  approverGroups:
+    - gitops-deletion-approvers
+  requesterGroups:
+    - gitops-deletion-requesters
+    - gitops-operators
+  exemptUsers:
+    - system:apiserver
+    - system:serviceaccount:guardrails-system:breakglass        # token under dual control in the vault; every use is a P1 alert
+  reaperUsers:
+    - system:serviceaccount:guardrails-system:approval-reaper
+  gitopsServiceAccounts:
+    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
+  privilegedClusterRoles:
+    - cluster-admin
+    - admin
+    - guardrails-approver
+    - guardrails-breakglass
+  privilegedGroups:
+    - platform-admins
+    - gitops-deletion-approvers
+    - gitops-deletion-requesters
+  approvalTTL: 4h
+  runbookURL: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md

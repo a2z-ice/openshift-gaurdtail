@@ -1,0 +1,283 @@
+# ---------------------------------------------------------------------------
+# Loki AlertingRules evaluated on the AUDIT tenant. Every rule carries guardrail="true" so the
+# Alertmanager route sends it to email + Microsoft Teams with no grouping delay.
+#
+# Field names: the Loki `json` parser flattens the Kubernetes audit event, so
+#   user.username                         -> user_username
+#   objectRef.resource / namespace / name -> objectRef_resource / objectRef_namespace / objectRef_name
+#   responseStatus.code                   -> responseStatus_code
+#   impersonatedUser.username             -> impersonatedUser_username
+#   annotations["guardrails-critical-delete/decision"]                  -> annotations_guardrails_critical_delete_decision
+#   annotations["validation.policy.admission.k8s.io/validation_failure"] -> annotations_validation_policy_admission_k8s_io_validation_failure
+#
+# Two independent detection paths for a critical deletion:
+#   CriticalResourceDeleted   keys off the audit annotation the policy stamps (precise, any kind, any name)
+#   GitOpsResourceDeleted     keys off resource/namespace names only (still fires if the policy were removed)
+# ---------------------------------------------------------------------------
+apiVersion: loki.grafana.com/v1
+kind: AlertingRule
+metadata:
+  name: guardrails-audit-alerts
+  namespace: openshift-logging
+  labels:
+    openshift.io/log-alerting: "true"
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  tenantID: audit
+  groups:
+    - name: guardrails.deletion
+      interval: 30s
+      rules:
+        - alert: CriticalResourceDeleted
+          expr: |
+            sum by (user_username, impersonatedUser_username, objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb="delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | annotations_guardrails_critical_delete_decision =~ ".+"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "RED ALERT: critical resource DELETED - {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            description: >-
+              {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} was deleted by
+              {{ $labels.user_username }}{{ if $labels.impersonatedUser_username }} (impersonating {{ $labels.impersonatedUser_username }}){{ end }}
+              on cluster {{ $labels.openshift_labels_cluster }}. Deletion passed the two-person rule or came from an exempt identity.
+              Verify the approvals in the audit trail and start the restore runbook if this was not expected.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#respond-to-a-red-alert
+        - alert: GitOpsResourceDeleted
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb="delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | (objectRef_namespace =~ "openshift-gitops|openshift-gitops-operator|guardrails-system"
+                   or objectRef_resource =~ "argocds|customresourcedefinitions|validatingadmissionpolicies|validatingadmissionpolicybindings|guardrailconfigs|clusterlogforwarders|lokistacks"
+                   or objectRef_name =~ "openshift-gitops|openshift-gitops-operator|guardrails-system")
+                | objectRef_resource !~ "pods|replicasets|endpoints|endpointslices|events|leases|jobs|configmaps"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "RED ALERT: GitOps/guardrail object deleted - {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            description: "Deleted by {{ $labels.user_username }}. Name-based fallback detection (independent of the admission policy)."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#respond-to-a-red-alert
+        - alert: CriticalResourceDeleteDenied
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb="delete"
+                | responseStatus_code >= 400
+                | annotations_validation_policy_admission_k8s_io_validation_failure =~ ".*guardrails-critical-delete.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Deletion of critical {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} was BLOCKED"
+            description: "{{ $labels.user_username }} attempted to delete a critical resource without the required approvals. Blocked by the admission guardrail. If this was Argo CD, a manifest was removed from Git - review the PR."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#deletion-denied
+        - alert: CriticalDeletionApprovalRecorded
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"patch|update"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | annotations_guardrails_critical_delete_decision =~ ".+"
+                | requestObject_metadata_annotations_guardrails_example_com_delete_approvals =~ ".+"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: info
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Deletion approval activity on {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
+            description: "A deletion request/approval annotation changed. Expected during a planned deletion; investigate if no change ticket exists."
+    - name: guardrails.integrity
+      interval: 30s
+      rules:
+        - alert: GuardrailPolicyModified
+          expr: |
+            sum by (user_username, verb, objectRef_resource, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"create|update|patch|delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | (objectRef_resource =~ "validatingadmissionpolicies|validatingadmissionpolicybindings|guardrailconfigs"
+                   or (objectRef_resource =~ "clusterroles|clusterrolebindings|cronjobs|configmaps" and objectRef_name =~ "guardrails-.*|approval-reaper"))
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:apiserver"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Guardrail policy object changed out of band: {{ $labels.verb }} {{ $labels.objectRef_resource }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
+            description: "Only Argo CD should write these objects. Treat as a tampering attempt until proven otherwise; Argo CD self-heal will revert drift within minutes."
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#guardrail-tampering
+        - alert: AuditProfileChanged
+          expr: |
+            sum by (user_username) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"update|patch"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_resource="apiservers" | objectRef_name="cluster"
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "APIServer/cluster changed by {{ $labels.user_username }} (audit profile may have been downgraded)"
+            description: "Verify spec.audit.profile is still WriteRequestBodies: oc get apiserver cluster -o jsonpath='{.spec.audit}'"
+        - alert: AuditForwarderChanged
+          expr: |
+            sum by (user_username, verb, objectRef_resource, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"update|patch|delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_resource =~ "clusterlogforwarders|lokistacks|alertingrules"
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-logging:.*|system:serviceaccount:openshift-operators-redhat:.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Audit pipeline object {{ $labels.objectRef_resource }}/{{ $labels.objectRef_name }} changed by {{ $labels.user_username }}"
+            description: "A change to the forwarder, LokiStack or alert rules can blind detection. Confirm it came from an approved PR."
+    - name: guardrails.identity
+      interval: 30s
+      rules:
+        - alert: PrivilegedRBACChange
+          expr: |
+            sum by (user_username, verb, objectRef_resource, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"create|update|patch|delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | annotations_guardrails_rbac_escalation_audit_privileged_change =~ ".+"
+                | user_username !~ "system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller|system:serviceaccount:openshift-authentication:.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "Privileged RBAC/group change: {{ $labels.verb }} {{ $labels.objectRef_resource }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
+            description: "Binding to cluster-admin or membership of an approver/admin group changed. Confirm against the access-request ticket."
+        - alert: ImpersonationUsed
+          expr: |
+            sum by (user_username, impersonatedUser_username, verb, objectRef_resource) (
+              count_over_time(
+                {log_type="audit"} | json
+                | impersonatedUser_username =~ ".+"
+                | verb !~ "get|list|watch"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "{{ $labels.user_username }} impersonated {{ $labels.impersonatedUser_username }} for a write ({{ $labels.verb }} {{ $labels.objectRef_resource }})"
+            description: "Impersonating an approver is the primary way to forge an approval. Any write via impersonation is treated as an incident."
+        - alert: BreakGlassUsed
+          expr: |
+            sum by (verb, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | user_username="system:serviceaccount:guardrails-system:breakglass"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "BREAK-GLASS identity used: {{ $labels.verb }} {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            description: "The dual-control emergency identity made a request. There must be an open incident naming the two token custodians."
+        - alert: KubeadminOrSystemAdminUsed
+          expr: |
+            sum by (user_username, verb, objectRef_resource) (
+              count_over_time(
+                {log_type="audit"} | json
+                | user_username =~ "kube:admin|system:admin"
+                | verb !~ "get|list|watch"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "{{ $labels.user_username }} performed a write ({{ $labels.verb }} {{ $labels.objectRef_resource }})"
+            description: "kubeadmin should be removed and the installer system:admin kubeconfig vaulted. Any use is an incident."
+        - alert: ArgoCDDirectMutation
+          expr: |
+            sum by (user_username, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | annotations_guardrails_gitops_only_mutation_direct_mutation =~ ".+"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Out-of-band edit of critical {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} by {{ $labels.user_username }}"
+            description: "Critical resources must change through Git. In phase 4 this is blocked; until then it is flagged."
+        - alert: ControlPlaneNodeAccess
+          expr: |
+            sum by (user_username, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb="create"
+                | objectRef_subresource =~ "exec|attach|debug"
+                | objectRef_namespace =~ "openshift-etcd|openshift-kube-apiserver|openshift-debug-.*|default"
+                | user_username !~ "system:serviceaccount:.*"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "{{ $labels.user_username }} opened a shell on a control-plane pod/node ({{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }})"
+            description: "Node-level access (oc debug node, etcd exec) is the only way around the admission guardrail. Must map to an open incident."
