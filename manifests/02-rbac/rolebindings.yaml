@@ -1,0 +1,217 @@
+# Namespaced RoleBindings: one pair per platform namespace. Add a pair when a new critical namespace appears.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-gitops-operator
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-gitops-operator
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-logging
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-monitoring
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-monitoring
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-adp
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-approvers
+  namespace: openshift-etcd-backup
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-approver-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-executors
+  namespace: openshift-etcd-backup
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: guardrails-executor-namespaced
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }

@@ -1,10 +1,11 @@
 # ---------------------------------------------------------------------------
-# Break-glass identity.
-# The ONLY non-loopback identity exempt from the two-person rule. Its token is minted on demand
-# (`oc create token breakglass -n guardrails-system --duration=1h`) by TWO people under the
-# vault's dual-control policy - it is never stored in a file. Every request it makes is a P1
-# alert (BreakGlassUsed). It exists so that recovery is possible when approvers are unreachable
-# (e.g. IdP outage), which is the one scenario the two-person rule cannot serve.
+# Break-glass identity and its custodians.
+# The SA is the ONLY non-loopback identity exempt from the two-person rule. Its token is minted on demand
+# (`oc create token breakglass -n guardrails-system --duration=1h`) by a member of breakglass-custodians,
+# with a second custodian present and an incident ticket open. Minting is alerted (BreakGlassTokenMinted),
+# every request made with the token is alerted (BreakGlassUsed). A minted token cannot be revoked before it
+# expires (bound tokens), which is why the duration is short and the mint itself is the audited event.
+# JIT platform-admins can also mint it (cluster-admin) - that is alerted the same way; keep the group empty at rest.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
@@ -15,7 +16,7 @@ metadata:
     guardrails.example.com/critical: "true"
     app.kubernetes.io/part-of: guardrails
   annotations:
-    guardrails.example.com/description: "Dual-control emergency identity. Token minted only via the vault break-glass procedure (docs/09-runbooks.md)."
+    guardrails.example.com/description: "Dual-control emergency identity. Token minted only via the break-glass procedure (docs/09-runbooks.md)."
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -32,3 +33,36 @@ subjects:
   - kind: ServiceAccount
     name: breakglass
     namespace: guardrails-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guardrails-breakglass-custodian
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["breakglass"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["breakglass"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guardrails-breakglass-custodians
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: guardrails-breakglass-custodian
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: breakglass-custodians }

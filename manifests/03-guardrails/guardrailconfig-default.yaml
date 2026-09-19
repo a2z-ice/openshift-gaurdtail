@@ -23,16 +23,24 @@ spec:
   exemptUsers:
     - system:apiserver
     - system:serviceaccount:guardrails-system:breakglass        # token under dual control in the vault; every use is a P1 alert
+  olmServiceAccounts:
+    - system:serviceaccount:openshift-operator-lifecycle-manager:olm-operator-serviceaccount   # may delete superseded CSVs on upgrade
   reaperUsers:
     - system:serviceaccount:guardrails-system:approval-reaper
+  # THE GITOPS PATH: what these identities apply was merged through the repository ruleset (2 reviewers + code owners),
+  # so it is pre-approved. They are exempt from the two-person rule; their deletions are alerted as GitOpsCriticalDeletionApplied.
+  gitopsControllers:
+    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller   # syncs and prunes from Git
+    - system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller       # generates Applications from Git
+  # TRUSTED MUTATORS: may update critical objects (and add the critical label) but are NOT exempt from deletion.
+  # argocd-server acts for UI/CLI users - those actions are not Git-reviewed, so a UI delete still needs the workflow.
   gitopsServiceAccounts:
-    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller   # applies manifests
-    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server                   # UI/CLI sync & refresh write .operation and the refresh annotation on Applications
-    - system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller       # generates/updates Applications
+    - system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server                   # UI/CLI sync & refresh write .operation and the refresh annotation
     - system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager   # reconciles the ArgoCD CR
     # add here, after observing ArgoCDDirectMutation in phases 1-3, any controller that legitimately
-    # writes critical objects (e.g. system:serviceaccount:external-secrets:external-secrets for critical Secrets,
-    # system:serviceaccount:openshift-adp:velero for restores). Never a human.
+    # writes critical objects: system:serviceaccount:guardrails-system:ldap-group-sync (Group membership),
+    # system:serviceaccount:external-secrets:external-secrets (critical Secrets), system:serviceaccount:openshift-adp:velero
+    # (restores). Never a human, never the reaper (it only needs the annotation-only path).
   privilegedClusterRoles:
     - cluster-admin
     - admin

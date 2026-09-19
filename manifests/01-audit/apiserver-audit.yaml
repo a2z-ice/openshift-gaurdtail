@@ -25,6 +25,10 @@ metadata:
   labels:
     guardrails.example.com/critical: "true"
 spec:
+  # Encrypt Secrets/ConfigMaps/Routes/OAuth tokens at rest in etcd (AES-256-GCM). One-time re-encryption
+  # 10-30 min; watch: oc get openshiftapiserver -o jsonpath='{.items[0].status.conditions[?(@.type=="Encrypted")]}'
+  encryption:
+    type: aesgcm
   audit:
     profile: WriteRequestBodies
     customRules:

@@ -88,10 +88,11 @@ spec:
           token:
             secretName: splunk-hec
             key: hecToken
-      tls:
-        ca:
-          configMapName: splunk-ca           # optional: CA bundle for the HEC endpoint (key ca-bundle.crt)
-          key: ca-bundle.crt
+      # If the HEC endpoint uses a private CA, create ConfigMap splunk-ca (key ca-bundle.crt) and uncomment:
+      # tls:
+      #   ca:
+      #     configMapName: splunk-ca
+      #     key: ca-bundle.crt
       rateLimit:
         maxRecordsPerSecond: 5000
     - name: loki-audit

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02-audit-logging · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>02 · Audit logging: profile, forwarding, retention, investigations</h1>
+<h2>Why</h2>
+<p>Every other control in this repository produces its evidence through the API-server audit log. If the audit log is incomplete, unattributable or mutable, the deletion guardrail still works but nobody can prove who did what, and the alerts cannot fire. OpenShift writes audit logs for three API servers (<code>kube-apiserver</code>, <code>openshift-apiserver</code>, <code>oauth-apiserver</code>) to the control-plane nodes; they are rotated locally and <strong>must</strong> be shipped off-node.</p>
+<h2>Design</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Value</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Audit profile</td>
+<td><code>WriteRequestBodies</code> (all groups)</td>
+<td>Metadata for every request, plus request <strong>and response bodies</strong> for create/update/patch/delete. Investigations need &quot;what exactly changed&quot;, which <code>Default</code> (metadata only) cannot answer. <code>AllRequestBodies</code> also logs GET/LIST bodies: several × the volume and copies secret values into the log stream. Reads are still attributed at metadata level (who read which secret).</td>
+</tr>
+<tr>
+<td>Sensitive kinds</td>
+<td>Red Hat&#39;s profile keeps <code>secrets</code>, <code>configmaps</code>, <code>routes</code>, <code>oauthclients</code>, tokens at Metadata level even under <code>WriteRequestBodies</code></td>
+<td>Verify on your build: <code>oc get cm -n openshift-kube-apiserver kube-apiserver-audit-policies -o yaml | grep -B2 -A6 secrets</code></td>
+</tr>
+<tr>
+<td>Custom rules</td>
+<td><code>system:authenticated:oauth</code>, <code>system:serviceaccounts:openshift-gitops</code>, <code>system:serviceaccounts:guardrails-system</code> → <code>WriteRequestBodies</code></td>
+<td>Explicit, so a future change of the top-level profile cannot silently drop bodies for humans or the GitOps controller</td>
+</tr>
+<tr>
+<td>Transport</td>
+<td>OpenShift Logging 6 (<code>ClusterLogForwarder</code>, Vector)</td>
+<td>Supported, runs on control-plane nodes (toleration), at-least-once delivery with disk buffering</td>
+</tr>
+<tr>
+<td>Outputs</td>
+<td><strong>SIEM (Splunk HEC)</strong> = system of record, 1–7 years, WORM index; <strong>LokiStack audit tenant</strong> = 90 days, only for alerting and quick investigations</td>
+<td>Two destinations from one pipeline so a SIEM outage never blinds alerting and vice versa</td>
+</tr>
+<tr>
+<td>Immutability</td>
+<td>Loki S3 bucket and SIEM cold storage with Object Lock (compliance mode); LokiStack retention 90 d; nobody has <code>delete</code> on the buckets</td>
+<td>Tamper evidence</td>
+</tr>
+<tr>
+<td>Labels</td>
+<td><code>openshift.labels.cluster=&lt;id&gt;</code>, <code>environment</code> added by the forwarder</td>
+<td>Multi-cluster SIEM correlation</td>
+</tr>
+</tbody></table>
+<p>Disk impact on control-plane nodes: <code>WriteRequestBodies</code> roughly doubles audit volume versus <code>Default</code>. kube-apiserver keeps 10 files × 100 MB per API server by default; with Vector shipping continuously this is fine on the standard 120 GB control-plane disks. Watch <code>node_filesystem_avail_bytes{mountpoint=&quot;/var&quot;}</code> on masters for a week after enabling.</p>
+<h2>The audit event, and the fields every rule uses</h2>
+<pre><code class="language-json">{
+  &quot;kind&quot;: &quot;Event&quot;, &quot;level&quot;: &quot;RequestResponse&quot;, &quot;auditID&quot;: &quot;…&quot;, &quot;stage&quot;: &quot;ResponseComplete&quot;,
+  &quot;requestURI&quot;: &quot;/apis/argoproj.io/v1beta1/namespaces/openshift-gitops/argocds/openshift-gitops&quot;,
+  &quot;verb&quot;: &quot;delete&quot;,
+  &quot;user&quot;: { &quot;username&quot;: &quot;alice@example.com&quot;, &quot;groups&quot;: [&quot;system:authenticated:oauth&quot;, &quot;gitops-deletion-requesters&quot;] },
+  &quot;impersonatedUser&quot;: { &quot;username&quot;: &quot;approver1@example.com&quot; },           // only when --as was used
+  &quot;sourceIPs&quot;: [&quot;10.0.12.7&quot;], &quot;userAgent&quot;: &quot;oc/4.21.0 …&quot;,
+  &quot;objectRef&quot;: { &quot;resource&quot;: &quot;argocds&quot;, &quot;namespace&quot;: &quot;openshift-gitops&quot;, &quot;name&quot;: &quot;openshift-gitops&quot;, &quot;apiGroup&quot;: &quot;argoproj.io&quot;, &quot;apiVersion&quot;: &quot;v1beta1&quot; },
+  &quot;responseStatus&quot;: { &quot;code&quot;: 403, &quot;reason&quot;: &quot;Forbidden&quot; },
+  &quot;requestObject&quot;: { … },  &quot;responseObject&quot;: { … },
+  &quot;requestReceivedTimestamp&quot;: &quot;2026-09-18T10:15:02.123456Z&quot;, &quot;stageTimestamp&quot;: &quot;…&quot;,
+  &quot;annotations&quot;: {
+    &quot;authorization.k8s.io/decision&quot;: &quot;allow&quot;,
+    &quot;authorization.k8s.io/reason&quot;: &quot;RBAC: allowed by ClusterRoleBinding \&quot;guardrails-executors\&quot; …&quot;,
+    &quot;guardrails-critical-delete/decision&quot;: &quot;op=DELETE user=alice@example.com groups=… requestedBy=… approvers=… approved=false exempt=false&quot;,
+    &quot;validation.policy.admission.k8s.io/validation_failure&quot;: &quot;[{\&quot;message\&quot;:\&quot;GUARDRAIL DENIED: …\&quot;,\&quot;policy\&quot;:\&quot;guardrails-critical-delete\&quot;,\&quot;binding\&quot;:\&quot;guardrails-critical-delete-named\&quot;,\&quot;expressionIndex\&quot;:0,\&quot;validationActions\&quot;:[\&quot;Deny\&quot;,\&quot;Audit\&quot;]}]&quot;
+  }
+}
+</code></pre>
+<p>The two <code>annotations</code> written by the policies are what make alerting precise: <code>guardrails-critical-delete/decision</code> is present on <strong>every</strong> evaluated request against a critical object (allowed or denied) and carries the approvers list; <code>validation_failure</code> is present when a validation failed and the binding had <code>Audit</code> in <code>validationActions</code>.</p>
+<p>Loki&#39;s <code>json</code> parser flattens nested keys with <code>_</code> and replaces non-alphanumerics: <code>user.username</code> → <code>user_username</code>, <code>annotations[&quot;guardrails-critical-delete/decision&quot;]</code> → <code>annotations_guardrails_critical_delete_decision</code>.</p>
+<h2>Manifests</h2>
+<ul>
+<li><code>manifests/01-audit/apiserver-audit.yaml</code> – the <code>APIServer/cluster</code> patch. Applying it rolls the kube-apiserver pods one by one (10–15 min, no downtime). The object is critical: lowering the profile later needs approvals.</li>
+<li><code>manifests/01-audit/operators.yaml</code> – Logging + Loki operators.</li>
+<li><code>manifests/01-audit/lokistack.yaml</code> – <code>1x.small</code>, audit tenant retention 90 d, <code>rules.enabled</code> with selectors so the ruler loads <code>AlertingRule</code>s labelled <code>openshift.io/log-alerting=true</code> from namespaces labelled <code>openshift.io/cluster-monitoring=true</code>.</li>
+<li><code>manifests/01-audit/clusterlogforwarder-audit.yaml</code> – SA + two ClusterRoleBindings (<code>collect-audit-logs</code>, <code>logging-collector-logs-writer</code>), input <code>audit</code> with sources <code>kubeAPI, openshiftAPI, auditd, ovn</code>, outputs <code>siem-splunk</code> and <code>loki-audit</code>, one pipeline. Elasticsearch and syslog blocks are included commented out.</li>
+</ul>
+<p>Secrets to create from the vault (never in Git): <code>openshift-logging/logging-loki-s3</code>, <code>openshift-logging/splunk-hec</code> (key <code>hecToken</code>), optional CA ConfigMaps.</p>
+<h2>Verification</h2>
+<pre><code class="language-bash">oc get apiserver cluster -o jsonpath=&#39;{.spec.audit}&#39;; echo
+oc get co kube-apiserver                                   # PROGRESSING=False after the roll
+oc get clusterlogforwarder audit-forwarder -n openshift-logging -o jsonpath=&#39;{range .status.conditions[*]}{.type}={.status} {end}&#39;; echo
+oc get lokistack logging-loki -n openshift-logging -o jsonpath=&#39;{.status.conditions[?(@.type==&quot;Ready&quot;)].status}&#39;; echo
+# audit lines flowing? (platform Prometheus)
+oc -n openshift-monitoring exec -c prometheus prometheus-k8s-0 -- \
+  curl -s &#39;http://localhost:9090/api/v1/query?query=sum(rate(loki_distributor_lines_received_total{tenant=&quot;audit&quot;}[5m]))&#39;
+# raw sample on a master
+oc adm node-logs --role=master --path=kube-apiserver/audit.log | tail -1 | python3 -m json.tool | head -40
+</code></pre>
+<h2>Investigation cookbook</h2>
+<p>LogQL (Loki tenant <code>audit</code>; console → Observe → Logs, or <code>logcli</code> as in <code>scripts/audit-query.sh</code>):</p>
+<pre><code class="language-logql"># who deleted / changed object X, last 24 h
+{log_type=&quot;audit&quot;} | json | objectRef_name=&quot;openshift-gitops&quot; | verb=~&quot;update|patch|delete&quot;
+  | line_format &quot;{{.requestReceivedTimestamp}} {{.verb}} {{.objectRef_resource}} by {{.user_username}} imp={{.impersonatedUser_username}} rc={{.responseStatus_code}}&quot;
+
+# everything user Y wrote today (excluding reads)
+{log_type=&quot;audit&quot;} | json | user_username=&quot;alice@example.com&quot; | verb!~&quot;get|list|watch&quot;
+
+# every denied deletion of a critical object
+{log_type=&quot;audit&quot;} | json | verb=&quot;delete&quot; | annotations_validation_policy_admission_k8s_io_validation_failure=~&quot;.*guardrails-critical-delete.*&quot;
+
+# the full approval trail of one object (request, each approval, the delete)
+{log_type=&quot;audit&quot;} | json | objectRef_name=&quot;victim&quot; | annotations_guardrails_critical_delete_decision=~&quot;.+&quot;
+  | line_format &quot;{{.requestReceivedTimestamp}} {{.verb}} {{.user_username}} :: {{.annotations_guardrails_critical_delete_decision}}&quot;
+
+# what did the request body look like (needs WriteRequestBodies)
+{log_type=&quot;audit&quot;} | json | objectRef_name=&quot;victim&quot; | verb=&quot;patch&quot; | line_format &quot;{{.requestObject}}&quot;
+
+# impersonation, kubeadmin, break-glass
+{log_type=&quot;audit&quot;} | json | impersonatedUser_username=~&quot;.+&quot; or user_username=~&quot;kube:admin|system:admin|system:serviceaccount:guardrails-system:breakglass&quot;
+</code></pre>
+<p>Splunk SPL equivalents:</p>
+<pre><code class="language-spl">index=openshift_audit objectRef.name=&quot;openshift-gitops&quot; verb IN (update,patch,delete)
+| table _time verb objectRef.resource user.username impersonatedUser.username responseStatus.code &quot;annotations.guardrails-critical-delete/decision&quot;
+
+index=openshift_audit verb=delete &quot;annotations.validation.policy.admission.k8s.io/validation_failure&quot;=&quot;*guardrails-critical-delete*&quot;
+| stats count by user.username objectRef.resource objectRef.namespace objectRef.name
+</code></pre>
+<p>Retention and legal hold: the SIEM index is the record. Configure a 1-year hot / 7-year cold policy (or your regulator&#39;s), WORM on cold, and a documented legal-hold procedure. Loki&#39;s 90 days are operational only.</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/02-audit-logging.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

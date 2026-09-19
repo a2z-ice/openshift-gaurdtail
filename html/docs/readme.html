@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>README · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>OpenShift 4.21 – Audit Trail, Critical-Resource Deletion Guardrails and Red Alerting</h1>
+<p>Production-grade controls for an OpenShift Container Platform 4.21 cluster that runs OpenShift GitOps (Argo CD):</p>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>How it is met</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Every edit and deletion is attributable (who, what, when, from where)</td>
+<td>API-server audit profile <code>WriteRequestBodies</code>, forwarded to the SIEM (system of record) <strong>and</strong> to an in-cluster LokiStack (for alerting), 90-day in-cluster retention, object-locked buckets</td>
+<td><a href="02-audit-logging.html">docs/02</a>, <code>manifests/01-audit</code></td>
+</tr>
+<tr>
+<td>No single person, <strong>including cluster-admin</strong>, can delete a critical resource <strong>out of band</strong></td>
+<td><code>ValidatingAdmissionPolicy</code> inside kube-apiserver enforces a two-person rule for any direct API deletion: request + ≥ 2 distinct approvals + executor ≠ approver. Changes merged through Git (2 reviewers) and applied by the Argo CD controllers are the pre-approved GitOps path</td>
+<td><a href="04-deletion-guardrails.html">docs/04</a>, <code>manifests/03-guardrails</code></td>
+</tr>
+<tr>
+<td>Argo CD itself cannot be removed by one authorised user</td>
+<td>The <code>ArgoCD</code> CR, its namespace, operator Subscription/CSV, CRDs, AppProjects and Applications are all &quot;critical&quot;: any direct deletion (oc, console, Argo CD UI) needs the workflow. Removal through Git needs the 2-reviewer PR and is alerted</td>
+<td><a href="05-argocd-protection.html">docs/05</a>, <code>manifests/04-argocd</code></td>
+</tr>
+<tr>
+<td>Any deletion (or attempt) raises a red alert to <strong>email and Microsoft Teams</strong> within seconds</td>
+<td>Loki <code>AlertingRule</code>s on the audit stream + metrics-based <code>PrometheusRule</code>s (second, audit-independent channel) → Alertmanager 0.29 with <code>email_configs</code> + <code>msteamsv2_configs</code> (Teams Workflows), <code>group_wait: 0s</code></td>
+<td><a href="06-alerting-and-notifications.html">docs/06</a>, <code>manifests/05-alerting</code></td>
+</tr>
+<tr>
+<td>Still recoverable if everything else fails</td>
+<td>OADP schedules (6-hourly) + Git as source of truth + cold-start runbook</td>
+<td><a href="07-backup-and-recovery.html">docs/07</a>, <code>manifests/06-backup</code></td>
+</tr>
+<tr>
+<td>The guardrails cannot be quietly switched off</td>
+<td>Policy objects are themselves critical, GitOps-only in <strong>every</strong> phase (hardened binding), RBAC-scoped with <code>resourceNames</code>, self-healed by Argo CD, and every out-of-band write to them is a P1 alert. Git side: 2 reviewers + CODEOWNERS, no bypass</td>
+<td><a href="04-deletion-guardrails.html#self-protection">docs/04 §self-protection</a>, <a href="08-github-approval-workflow.html">docs/08</a></td>
+</tr>
+</tbody></table>
+<p>Verified against: OCP 4.21 (Kubernetes 1.34, Alertmanager 0.29.0, Prometheus 3.7), OpenShift GitOps 1.19+, OpenShift Logging 6.x (<code>observability.openshift.io/v1</code>), Loki Operator 6.x, OADP 1.5.</p>
+<h2>Trust model (read this first)</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Who acts on the cluster</th>
+<th>Approval</th>
+<th>Cluster-side control</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>GitOps path</strong></td>
+<td>Argo CD application-controller / ApplicationSet controller applying a merged commit</td>
+<td>the repository ruleset: 2 reviewers + code owners (<code>docs/08</code>)</td>
+<td><strong>exempt</strong> from the two-person rule (<code>GuardrailConfig.spec.gitopsControllers</code>); every Git-driven deletion of a critical object is still alerted as <code>GitOpsCriticalDeletionApplied</code> for PR correlation</td>
+</tr>
+<tr>
+<td><strong>Out-of-band path</strong></td>
+<td>humans with <code>oc</code>/console, Argo CD UI/CLI (acts as <code>argocd-server</code>, not Git-reviewed), any other controller, break-glass</td>
+<td>the two-person rule on the cluster: request + 2 approvers + executor</td>
+<td><code>guardrails-critical-delete</code> (Deny in phase ≥ 3), label control, GitOps-only mutation for the self-protection set (Deny in every phase)</td>
+</tr>
+</tbody></table>
+<p>Create/update/delete through Git needs no extra approval on the cluster. The same operation done directly against the API on a critical object needs the workflow, whoever the actor is, including cluster-admin.</p>
+<h2>Architecture</h2>
+<pre class="mermaid">flowchart TB
+    subgraph L1["1 - Identity and RBAC"]
+        IdP["IdP groups&lt;br/>platform-admins JIT&lt;br/>gitops-deletion-approvers&lt;br/>gitops-deletion-requesters&lt;br/>gitops-operators, auditors"]
+    end
+    subgraph L2["2 - Argo CD, openshift-gitops"]
+        Git[("GitHub&lt;br/>2 reviewers + CODEOWNERS")]
+        ArgoCD["Argo CD app guardrails&lt;br/>selfHeal on, prune off&lt;br/>no cascade finalizer"]
+        Git --> ArgoCD
+    end
+    subgraph API["kube-apiserver"]
+        RBAC["RBAC"]
+        VAP["3 - ValidatingAdmissionPolicy&lt;br/>guardrails-critical-delete&lt;br/>two-person rule in CEL"]
+        Audit["5 - Audit log&lt;br/>WriteRequestBodies + policy annotations"]
+        RBAC --> VAP --> Audit
+    end
+    Users["Humans and CI&lt;br/>oc or console"] --> RBAC
+    IdP -.-> Users
+    ArgoCD -- "applies: GitOps path, pre-approved by the PR ruleset" --> RBAC
+    Audit --> Vector["Vector collector&lt;br/>ClusterLogForwarder"]
+    Vector --> SIEM[("Splunk or Elastic&lt;br/>system of record, WORM")]
+    Vector --> Loki[("LokiStack audit tenant&lt;br/>90 days")]
+    Loki --> Ruler["6 - Loki ruler&lt;br/>AlertingRules on audit events"]
+    Prom["6 - Prometheus&lt;br/>PrometheusRules: Argo CD missing,&lt;br/>namespace Terminating, ingestion stalled"]
+    Ruler --> AM["7 - Alertmanager 0.29&lt;br/>route guardrail=true, group_wait 0s"]
+    Prom --> AM
+    AM --> Email["Email&lt;br/>platform + security on-call"]
+    AM --> Teams["Microsoft Teams channel&lt;br/>Workflows webhook, adaptive card"]
+    OADP["8 - OADP schedules&lt;br/>6h / 30d and daily / 90d"] -.-> API
+    classDef control fill:#fde7e7,stroke:#b00020,color:#000
+    classDef detect fill:#fff4e0,stroke:#b36b00,color:#000
+    classDef notify fill:#e6f2ff,stroke:#0b5cad,color:#000
+    class VAP control
+    class Ruler,Prom,Audit detect
+    class AM,Email,Teams notify</pre>
+<h2>The deletion workflow in one picture</h2>
+<pre class="mermaid">sequenceDiagram
+    autonumber
+    participant R as Requester
+    participant A1 as Approver 1
+    participant A2 as Approver 2
+    participant E as Executor
+    participant API as kube-apiserver + VAP
+    participant AM as Alertmanager
+    R->>API: annotate delete-request and delete-requested-by = own username
+    API-->>AM: info CriticalDeletionApprovalRecorded
+    A1->>API: append delete-approvals entry approver1|timestamp
+    Note over API: CEL checks: entry names the caller, caller in approver group,&lt;br/>caller is not the requester, nothing else changed
+    A2->>API: append delete-approvals entry approver2|timestamp
+    E->>API: oc delete
+    Note over API: CEL checks: request present, 2+ distinct approvers,&lt;br/>executor is not an approver
+    API-->>E: 200 deleted
+    API-->>AM: CRITICAL CriticalResourceDeleted from audit log
+    API-->>AM: CRITICAL ArgoCDApplicationControllerMissing from metrics
+    AM-->>R: Email + Microsoft Teams card
+    Note over R,AM: Any step that fails a CEL rule returns 403 and raises CriticalResourceDeleteDenied</pre>
+<h2>Repository layout</h2>
+<pre><code>docs/                       numbered design + operations documents (start with 00 and 01)
+manifests/base/             phase-3 (enforce) definitions, kustomize
+manifests/overlays/phaseN   audit-only → warn → enforce → gitops-only (Argo CD points here)
+manifests/0X-*/             one directory per layer, every file has a header: purpose, phase, rollback
+scripts/                    request/approve/execute/cancel a deletion, verify-install, test matrix, audit query
+.github/                    CODEOWNERS, ruleset (2 approvals, no bypass), policy CI
+</code></pre>
+<h2>Quick start (after reading docs/10-rollout-plan.md)</h2>
+<pre><code class="language-bash"># 0. replace placeholders (docs/00-placeholders.md), commit through a 2-reviewer PR
+# 1. phase 1 – audit only; nothing is blocked yet
+oc apply --server-side -k manifests/overlays/phase1-audit
+# 2. wire secrets from the vault: logging-loki-s3, splunk-hec, alertmanager-main (SMTP + Teams URL), cloud-credentials
+# 3. verify
+scripts/verify-install.sh
+# 4. after ≥1 week clean: phase 2 (warn) → phase 3 (enforce) → phase 4 (gitops-only) by changing the Argo CD app path via PR
+# 5. sign-off: scripts/test-guardrails.sh  (expects every negative case denied, happy path allowed, alerts received)
+</code></pre>
+<h2>Using this repository with AI assistants</h2>
+<p>Any LLM tool can operate this repository with a few hundred tokens of context:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Read by</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AGENTS.md</code></td>
+<td>Codex, Cursor, Copilot, Gemini CLI, Claude Code (via <code>CLAUDE.md</code>), others</td>
+<td>hard rules, facts, commands, read map: the only file an assistant needs by default</td>
+</tr>
+<tr>
+<td><code>CLAUDE.md</code></td>
+<td>Claude Code</td>
+<td>imports <code>AGENTS.md</code>, lists skills/subagents</td>
+</tr>
+<tr>
+<td><code>.claude/skills/*/SKILL.md</code></td>
+<td>Claude Code (<code>/guardrail-*</code>), any tool as plain procedures</td>
+<td>delete, investigate, verify, rollout, incident</td>
+</tr>
+<tr>
+<td><code>.claude/agents/*.md</code></td>
+<td>Claude Code subagents</td>
+<td><code>guardrail-operator</code>, <code>audit-investigator</code> (read-only), <code>guardrail-change-reviewer</code></td>
+</tr>
+<tr>
+<td><code>.claude/settings.json</code></td>
+<td>Claude Code</td>
+<td>pre-allowed read-only commands; denies CRD/namespace/policy deletes, impersonation, break-glass token minting</td>
+</tr>
+<tr>
+<td><code>llm/context.yaml</code></td>
+<td>any tool</td>
+<td>the facts, machine-readable</td>
+</tr>
+<tr>
+<td><code>llm/memory.md</code></td>
+<td>any tool</td>
+<td>shared durable memory + state log (phase, tests, open risks): update it</td>
+</tr>
+<tr>
+<td><code>llms.txt</code></td>
+<td>any tool / crawler</td>
+<td>index of the files above</td>
+</tr>
+<tr>
+<td><code>.github/copilot-instructions.md</code>, <code>.cursor/rules/guardrails.mdc</code></td>
+<td>Copilot, Cursor</td>
+<td>one-line pointers to <code>AGENTS.md</code></td>
+</tr>
+</tbody></table>
+<h2>Document index</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Document</th>
+<th>Read when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>00</td>
+<td><a href="00-placeholders.html">Placeholders</a></td>
+<td>before the first apply</td>
+</tr>
+<tr>
+<td>01</td>
+<td><a href="01-threat-model.html">Threat model &amp; residual risk</a></td>
+<td>to understand what is and is not covered</td>
+</tr>
+<tr>
+<td>02</td>
+<td><a href="02-audit-logging.html">Audit logging</a></td>
+<td>designing retention / SIEM / investigations</td>
+</tr>
+<tr>
+<td>03</td>
+<td><a href="03-identity-rbac-hardening.html">Identity &amp; RBAC hardening</a></td>
+<td>before enforcing (the guardrail is only as strong as this)</td>
+</tr>
+<tr>
+<td>04</td>
+<td><a href="04-deletion-guardrails.html">Deletion guardrails (VAP/CEL)</a></td>
+<td>the core mechanism, rule by rule</td>
+</tr>
+<tr>
+<td>05</td>
+<td><a href="05-argocd-protection.html">Argo CD protection</a></td>
+<td>GitOps-specific hardening</td>
+</tr>
+<tr>
+<td>06</td>
+<td><a href="06-alerting-and-notifications.html">Alerting &amp; notifications</a></td>
+<td>email/Teams setup, alert catalogue</td>
+</tr>
+<tr>
+<td>07</td>
+<td><a href="07-backup-and-recovery.html">Backup &amp; recovery</a></td>
+<td>RPO/RTO, restore drill</td>
+</tr>
+<tr>
+<td>08</td>
+<td><a href="08-github-approval-workflow.html">GitHub approval workflow</a></td>
+<td>repo/branch protection</td>
+</tr>
+<tr>
+<td>09</td>
+<td><a href="09-runbooks.html">Runbooks</a></td>
+<td>operating it day to day and in an incident</td>
+</tr>
+<tr>
+<td>10</td>
+<td><a href="10-rollout-plan.html">Rollout plan</a></td>
+<td>phased enablement with exit criteria and rollback</td>
+</tr>
+<tr>
+<td>11</td>
+<td><a href="11-testing-and-validation.html">Testing &amp; validation</a></td>
+<td>sign-off evidence</td>
+</tr>
+<tr>
+<td>12</td>
+<td><a href="12-operations-and-compliance.html">Operations &amp; compliance</a></td>
+<td>recurring reviews, control mapping</td>
+</tr>
+<tr>
+<td>13</td>
+<td><a href="13-solution-justification.html">Solution justification</a></td>
+<td>presenting the design to an architecture/security review board</td>
+</tr>
+<tr>
+<td>14</td>
+<td><a href="14-manual-test-guide.html">Manual test guide</a></td>
+<td>step-by-step positive and negative tests with expected output</td>
+</tr>
+<tr>
+<td>15</td>
+<td><a href="15-implementation-guide.html">Implementation guide</a></td>
+<td>the ordered, step-by-step rollout with verification, rollback and a tracking table</td>
+</tr>
+<tr>
+<td>16</td>
+<td><a href="16-production-readiness-review.html">Production readiness review</a></td>
+<td>independent audit findings, what was fixed, and the 100 % test traceability matrix</td>
+</tr>
+<tr>
+<td>–</td>
+<td><a href="../index.html">HTML portal</a></td>
+<td>entry point with summary and navigation to the study guide and HTML versions of every document (<code>node scripts/build-html-docs.mjs</code> regenerates <code>html/docs/</code>)</td>
+</tr>
+<tr>
+<td>–</td>
+<td><a href="../study-guide.html">Study guide (HTML)</a></td>
+<td>complete technical study material, foundations to corner cases, with the gap-fix implementations</td>
+</tr>
+</tbody></table>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>README.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

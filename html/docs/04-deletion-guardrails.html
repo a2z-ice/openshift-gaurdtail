@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04-deletion-guardrails · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>04 · Deletion guardrails: the two-person rule in kube-apiserver</h1>
+<h2>Scope: out-of-band changes only</h2>
+<p>The GitOps path is pre-approved: a change merged through the repository ruleset (two reviewers, code owners) and applied by the Argo CD application-controller or ApplicationSet controller (<code>GuardrailConfig.spec.gitopsControllers</code>) is exempt from every rule below. Git-driven deletions of critical objects are alerted as <code>GitOpsCriticalDeletionApplied</code> so they can be correlated with the PR. Everything else that touches a critical object directly, whoever the actor is (humans with <code>oc</code>/console, the Argo CD UI/CLI acting as <code>argocd-server</code>, other controllers, cluster-admin), is out of band and subject to the two-person rule.</p>
+<h2>Why ValidatingAdmissionPolicy (VAP)</h2>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>ValidatingAdmissionPolicy (chosen)</strong></td>
+<td>Built into kube-apiserver (GA since Kubernetes 1.30; OCP 4.21 = 1.34). Evaluated in-process for every request, including <code>system:masters</code>. No webhook to be down, no operator to be uninstalled, no pod to be scaled to zero. Policy = declarative CEL, reviewable in a PR.</td>
+</tr>
+<tr>
+<td>Kyverno / Gatekeeper</td>
+<td>Same logic possible, plus a clock, but adds a webhook whose availability and RBAC become part of the attack surface (delete the webhook configuration → control gone). Acceptable as a <em>second</em> engine; not needed.</td>
+</tr>
+<tr>
+<td>RBAC only</td>
+<td>Cannot express &quot;delete only with approvals&quot;; anyone with <code>delete</code> deletes.</td>
+</tr>
+<tr>
+<td>Finalizers only</td>
+<td>A finalizer does not stop the DELETE (object goes to Terminating); the controller that removes it can be bypassed by patching finalizers; no approval concept.</td>
+</tr>
+</tbody></table>
+<h2>Mechanism: approval on the target object</h2>
+<p>A deletion needs three annotations on the object being deleted. Because they live <strong>on the object</strong>, the approval trail is in the audit log of that very object, no separate controller or CRD instance is needed, and the object disappears with its approvals when the deletion succeeds.</p>
+<table>
+<thead>
+<tr>
+<th>Annotation (<code>guardrails.example.com/</code>)</th>
+<th>Written by</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>delete-request</code></td>
+<td>requester</td>
+<td><code>&quot;&lt;change-ticket&gt;: &lt;reason&gt;&quot;</code></td>
+</tr>
+<tr>
+<td><code>delete-requested-by</code></td>
+<td>requester</td>
+<td>requester&#39;s own username (enforced)</td>
+</tr>
+<tr>
+<td><code>delete-approvals</code></td>
+<td>each approver, one at a time</td>
+<td><code>&quot;&lt;user&gt;|&lt;RFC3339 UTC&gt;,&lt;user&gt;|&lt;RFC3339 UTC&gt;&quot;</code></td>
+</tr>
+</tbody></table>
+<p>Plus the marker that makes an object critical: label <code>guardrails.example.com/critical: &quot;true&quot;</code>. Objects that cannot be labelled reliably before installation (namespaces, CRDs, the policies themselves, groups, <code>APIServer/cluster</code>, the <code>ArgoCD</code> CR, OLM objects) are protected <strong>by name</strong> inside the policy (<code>variables.nameCritical</code>).</p>
+<p>Parameters (<code>GuardrailConfig/default</code>): <code>minApprovers</code> (2), <code>executorMayBeApprover</code> (false → three people), <code>approverGroups</code>, <code>requesterGroups</code>, <code>exemptUsers</code> (API-server loopback + break-glass SA), <code>reaperUsers</code>, <code>gitopsServiceAccounts</code>, <code>approvalTTL</code> (4h), <code>runbookURL</code>.</p>
+<h2>The policy, rule by rule (<code>manifests/03-guardrails/vap-critical-delete.yaml</code>)</h2>
+<p>All rules are evaluated on the <strong>pre-request state</strong> (<code>oldObject</code>), so nothing can be changed and exploited in the same request.</p>
+<table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Operation</th>
+<th>Passes when</th>
+<th>Blocks</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>V1</strong></td>
+<td>DELETE</td>
+<td>not critical, or caller exempt, or <code>deletionApproved</code></td>
+<td>every deletion without the two-person rule, by anyone</td>
+</tr>
+<tr>
+<td><strong>V2</strong></td>
+<td>UPDATE</td>
+<td>the <code>critical=true</code> label stays, or <code>deletionApproved</code></td>
+<td>&quot;unlabel, then delete&quot;</td>
+</tr>
+<tr>
+<td><strong>V3</strong></td>
+<td>UPDATE</td>
+<td>approvals unchanged; <strong>or</strong> cleared entirely (cancel); <strong>or</strong> reaper removing entries only; <strong>or</strong> exactly one entry appended whose user == caller, caller ∈ approver group, caller ∉ existing approvers, caller ≠ requester, a request exists, request unchanged, and nothing else in the object changed</td>
+<td>forged/duplicate/third-party approvals, approving your own request, smuggling a spec change into an approval</td>
+</tr>
+<tr>
+<td><strong>V4</strong></td>
+<td>UPDATE</td>
+<td>request unchanged; <strong>or</strong> approvals empty and (request cleared, or requested-by == caller ∧ caller ∈ requester/approver groups ∧ reason non-empty) and nothing else changed</td>
+<td>opening a request in someone else&#39;s name, editing the reason after approvals (which would let approvals apply to a different justification)</td>
+</tr>
+</tbody></table>
+<p><code>deletionApproved</code> := request present ∧ requested-by present ∧ <code>distinct(approvers) ≥ minApprovers</code> ∧ requester ∉ approvers ∧ (executor ∉ approvers unless <code>executorMayBeApprover</code>).</p>
+<p><code>auditAnnotations.decision</code> is stamped on every evaluated request (allowed or denied): <code>op=… user=… groups=… requestedBy=… approvers=… approved=… exempt=…</code>. The alerts key off it.</p>
+<p>Design notes:</p>
+<ul>
+<li><p><strong><code>payloadUnchanged</code></strong> compares labels, <code>spec</code>, <code>data</code>, <code>binaryData</code>, <code>immutable</code>, <code>rules</code>, <code>aggregationRule</code>, <code>subjects</code>, <code>roleRef</code>, <code>users</code>, <code>webhooks</code>, Application <code>operation</code>, <code>metadata.finalizers</code> and <code>metadata.ownerReferences</code>; an approval write that touches any of them is denied.</p>
+</li>
+<li><p><strong>Exemptions are explicit</strong>: <code>exemptUsers</code> (<code>system:apiserver</code>, the break-glass SA) and <code>gitopsControllers</code> (the two Argo CD controllers, the Git path). OLM may delete a superseded CSV during an operator upgrade (<code>olmServiceAccounts</code>, V1 clause). Not the garbage collector, not the namespace controller, not <code>argocd-server</code>. A controller whose delete is denied simply retries and the denial is alerted, which is the desired behaviour for a critical object.</p>
+</li>
+<li><p><strong>No clock in CEL</strong> → TTL is enforced by the reaper CronJob (<code>reaper-cronjob.yaml</code>, every 10 min); the policy lets that identity only <em>remove</em> entries. The reaper also removes entries whose timestamp is more than 5 minutes in the <strong>future</strong> or unparseable, so an approver cannot extend an approval by writing a far-future time. Approvals are also wiped by V4 whenever the request changes.</p>
+</li>
+<li><p><strong>Binding A</strong> (<code>-labelled</code>) uses <code>objectSelector</code> on the critical label. Kubernetes evaluates the selector against <code>object</code> <strong>or</strong> <code>oldObject</code>, so removing the label in the same request still matches (and V2 denies it). <strong>Binding B</strong> (<code>-named</code>) covers the name-protected, low-traffic kinds without a selector. Result: the policy costs nothing on the cluster&#39;s ordinary Secret/ConfigMap traffic.</p>
+</li>
+<li><p><strong>Fail closed where safe</strong>: <code>failurePolicy: Fail</code>; the labelled binding has <code>parameterNotFoundAction: Deny</code>, the named binding <code>Allow</code>, because the named binding matches every namespace/CRD/cluster-RBAC/group/OLM update cluster-wide and a missing <code>GuardrailConfig</code> must not stop OLM or the namespace lifecycle. Its absence is alerted (its deletion is <code>GuardrailPolicyModified</code>) and <code>verify-install.sh</code> checks it.</p>
+</li>
+<li><p><strong>Type-checking warnings are expected</strong>: <code>oc get vap guardrails-critical-delete -o yaml</code> lists warnings such as &quot;undefined field &#39;spec&#39;&quot; because the policy matches many kinds; evaluation is dynamic. Only a <code>status.conditions</code> error or an &quot;expression compile&quot; message is a problem.</p>
+</li>
+</ul>
+<h2>Companion policies</h2>
+<ul>
+<li><p><code>guardrails-critical-label-control</code> – only <code>gitopsServiceAccounts</code>, <code>exemptUsers</code> or approver-group members may <strong>add</strong> the critical label (CREATE or UPDATE). Without it any tenant with <code>patch</code> on a protected kind could mark their own object critical to force the platform team into the workflow or wedge their namespace in Terminating. Bound with the same label <code>objectSelector</code>; follows the phase actions.</p>
+</li>
+<li><p><code>guardrails-gitops-only-mutation</code> – critical objects may only be <em>changed</em> by the Argo CD identities (application-controller, server, applicationset-controller, the GitOps operator), the reaper (annotations only) or break-glass; a human editing the <code>ArgoCD</code> CR or the forwarder by hand is flagged (<code>ArgoCDDirectMutation</code>) in phases 1–3 and denied in phase 4. The approval workflow is explicitly allowed (only guardrail annotations change).</p>
+</li>
+<li><p><code>guardrails-rbac-escalation-audit</code> – never denies; a binding to <code>cluster-admin</code>/<code>admin</code>/<code>guardrails-*</code> or a change to a privileged group &quot;fails&quot; the validation with <code>[Warn, Audit]</code>, which stamps the audit event and warns the caller. <code>PrivilegedRBACChange</code> alerts on it.</p>
+</li>
+</ul>
+<h2>Self-protection</h2>
+<p>What stops someone from deleting the policy? Five things, in depth:</p>
+<ol>
+<li>The bindings, policies, <code>GuardrailConfig</code>, <code>guardrails-*</code> RBAC and the approver groups are <strong>critical by name</strong> → V1 applies to them (R3 in docs/01: confirm in phase 1 that your build evaluates VAPs against <code>admissionregistration.k8s.io</code> objects; the test script includes the case).</li>
+<li><strong>RBAC + hardened binding</strong>: approvers may <code>patch</code> the policy objects only by name (<code>resourceNames</code>), and the <code>guardrails-gitops-only-mutation-hardened</code> binding denies, in <strong>every phase</strong>, any change to GuardrailConfig, the policies/bindings, <code>guardrails-*</code> RBAC, the privileged Groups, APIServer/OAuth and labelled CronJobs by anyone but the GitOps path, trusted mutators and break-glass. Humans can still add approval annotations to them.</li>
+<li><strong>Argo CD self-heal</strong> recreates/reverts them within the sync interval (3 min default); the <code>guardrails</code> Application has no cascade finalizer, so deleting the <em>Application</em> out of band changes nothing on the cluster (and the Application is itself critical).</li>
+<li><strong>Alert</strong> <code>GuardrailPolicyModified</code> (P1) on any write to them by anyone but Argo CD.</li>
+<li><strong>Git</strong>: the only legitimate path is a PR with two reviewers and code-owner approval (docs/08).</li>
+</ol>
+<h2>Flows</h2>
+<p>Request → approve → execute (CLI):</p>
+<pre><code class="language-bash">scripts/request-deletion.sh argocd openshift-gitops -n openshift-gitops &quot;CHG0012345: migrate to new instance&quot;
+# approver 1 and approver 2, each from their own login:
+scripts/approve-deletion.sh argocd openshift-gitops -n openshift-gitops
+# executor (a third person, in gitops-deletion-requesters):
+scripts/execute-deletion.sh argocd openshift-gitops -n openshift-gitops
+</code></pre>
+<p>Without the scripts (what they do underneath):</p>
+<pre><code class="language-bash">oc annotate -n openshift-gitops argocd openshift-gitops --overwrite \
+  guardrails.example.com/delete-request=&quot;CHG0012345: migrate&quot; \
+  guardrails.example.com/delete-requested-by=&quot;$(oc whoami)&quot; \
+  guardrails.example.com/delete-approvals-
+# each approver appends only themself:
+CUR=$(oc get -n openshift-gitops argocd openshift-gitops -o go-template=&#39;{{index .metadata.annotations &quot;guardrails.example.com/delete-approvals&quot;}}&#39;)
+oc annotate -n openshift-gitops argocd openshift-gitops --overwrite \
+  guardrails.example.com/delete-approvals=&quot;${CUR:+$CUR,}$(oc whoami)|$(date -u +%Y-%m-%dT%H:%M:%SZ)&quot;
+oc delete -n openshift-gitops argocd openshift-gitops
+</code></pre>
+<p>Through Git instead of <code>oc</code>: if the object is managed from Git, delete it by PR. The Argo CD controller is a <code>gitopsController</code> and prunes it without the annotation workflow; <code>GitOpsCriticalDeletionApplied</code> fires so the on-call can match it to the merged PR. The annotation workflow is for out-of-band deletions and for objects that are not in Git.</p>
+<h2>Adding or removing a critical object</h2>
+<ul>
+<li>Label it in Git: <code>guardrails.example.com/critical: &quot;true&quot;</code> (kustomize <code>commonLabels</code> for a whole component works). Argo CD applies the label; from then on deletion needs approvals.</li>
+<li>Removing the label needs the same approvals as deletion (V2) when done out of band; removing it in Git is applied by the controller (GitOps path).</li>
+</ul>
+<h2>Verification</h2>
+<p>See docs/11, docs/16 (traceability matrix) and <code>scripts/test-guardrails.sh</code> (phase-aware). Minimum smoke test after apply:</p>
+<pre><code class="language-bash">oc get vap,vapb -l app.kubernetes.io/part-of=guardrails
+oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server   # must be denied with the GUARDRAIL DENIED message
+</code></pre>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/04-deletion-guardrails.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

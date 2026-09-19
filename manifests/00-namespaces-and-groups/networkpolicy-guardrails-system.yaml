@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# guardrails-system network isolation: nothing may talk to the reaper/sync pods, and they may only
+# reach DNS and the API server. Defence in depth for the two service accounts that hold patch rights.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-apiserver
+  namespace: guardrails-system
+  labels:
+    guardrails.example.com/critical: "true"
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+    # the kubernetes.default Service resolves to control-plane host IPs; allow them explicitly
+    - to:
+        - ipBlock: { cidr: 0.0.0.0/0 }   # REPLACE with your control-plane / API VIP CIDR, e.g. 10.0.0.0/24
+      ports:
+        - { protocol: TCP, port: 6443 }

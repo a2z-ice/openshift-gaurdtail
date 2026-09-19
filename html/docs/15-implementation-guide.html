@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15-implementation-guide · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>15 · Step-by-step implementation guide</h1>
+<p>Follow this document top to bottom to take the solution from an empty cluster to enforced guardrails in production. Every step states <strong>who</strong> does it, <strong>what</strong> to run, <strong>how to verify</strong>, <strong>how to roll back</strong>, and <strong>what evidence to keep</strong>. Steps reference the detailed documents rather than repeating them; open the referenced document only when a step says so.</p>
+<p>Time estimates assume one platform engineer with the accesses listed in Part A, a pre-production cluster that mirrors production, and an existing on-call rotation. Total elapsed time is dominated by the observation windows (phase 1 and phase 2, one week each), not by hands-on work (about three working days in total).</p>
+<pre><code>Part A  Prepare            (1–2 days)   decisions, accesses, repository, placeholders, ruleset
+Part B  Platform prereqs   (1 day)      identity, operators, storage, secrets, audit profile
+Part C  Bootstrap pre-prod (½ day)      phase 1 on pre-prod, verify, test, alert test
+Part D  Hand over to GitOps(½ day)      Argo CD owns the guardrails
+Part E  Phase gates        (2–4 weeks)  1 → 2 → 3 → 4 with exit criteria
+Part F  Production         (repeat C–E) with a change window for phase 3
+Part G  Operate            (ongoing)    recurring activities, hand-over
+</code></pre>
+<p>Use the tracking table in Appendix 1 to record completion, dates and evidence.</p>
+<hr>
+<h2>Part A · Prepare</h2>
+<h3>A1. Confirm the decisions this repository assumes</h3>
+<p><strong>Who:</strong> platform lead + security lead. <strong>Time:</strong> 1 h.</p>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Assumed</th>
+<th>If different</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Admission engine</td>
+<td>built-in ValidatingAdmissionPolicy</td>
+<td>do not proceed with this repository; the design depends on it</td>
+</tr>
+<tr>
+<td>Git provider</td>
+<td>GitHub / GitHub Enterprise</td>
+<td>port <code>.github/RULESET.md</code> to GitLab approval rules or Bitbucket merge checks</td>
+</tr>
+<tr>
+<td>SIEM</td>
+<td>Splunk HEC (Elasticsearch / syslog blocks provided)</td>
+<td>swap the output block in <code>manifests/01-audit/clusterlogforwarder-audit.yaml</code></td>
+</tr>
+<tr>
+<td>In-cluster alerting store</td>
+<td>LokiStack (Loki Operator)</td>
+<td>required; Loki rules are the audit-based detection path</td>
+</tr>
+<tr>
+<td>Notification</td>
+<td>email + Microsoft Teams (Workflows webhook)</td>
+<td>add/remove receivers in <code>manifests/05-alerting/alertmanager-main.yaml</code></td>
+</tr>
+<tr>
+<td>Backups</td>
+<td>OADP to S3-compatible storage with Object Lock</td>
+<td>adapt <code>manifests/06-backup/oadp-dpa.yaml</code></td>
+</tr>
+<tr>
+<td>Minimum approvers / executor rule</td>
+<td>2 approvers, executor ≠ approver (three people) for <strong>out-of-band</strong> deletions; Git changes are approved by the PR ruleset</td>
+<td><code>manifests/03-guardrails/guardrailconfig-default.yaml</code> (<code>minApprovers</code>, <code>executorMayBeApprover</code>); never below 2</td>
+</tr>
+<tr>
+<td>Trust model</td>
+<td>GitOps path (Argo CD controllers) exempt; <code>argocd-server</code> not</td>
+<td><code>gitopsControllers</code> vs <code>gitopsServiceAccounts</code> in the same file</td>
+</tr>
+</tbody></table>
+<p>Record the outcome in the change ticket that will carry the whole rollout.</p>
+<h3>A2. Assemble the people</h3>
+<p><strong>Who:</strong> platform lead. <strong>Time:</strong> ½ day (mostly waiting on HR/IdP).</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Minimum</th>
+<th>Group</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Deletion approvers</td>
+<td>4 people across 2 teams</td>
+<td><code>gitops-deletion-approvers</code></td>
+</tr>
+<tr>
+<td>Requesters/executors</td>
+<td>2</td>
+<td><code>gitops-deletion-requesters</code></td>
+</tr>
+<tr>
+<td>Argo CD day-2 operators</td>
+<td>as needed</td>
+<td><code>gitops-operators</code></td>
+</tr>
+<tr>
+<td>Auditors</td>
+<td>1</td>
+<td><code>auditors</code></td>
+</tr>
+<tr>
+<td>JIT cluster-admins</td>
+<td>as needed, <strong>empty at rest</strong></td>
+<td><code>platform-admins</code></td>
+</tr>
+<tr>
+<td>Break-glass custodians</td>
+<td>2, different teams</td>
+<td><code>breakglass-custodians</code> (may mint the token)</td>
+</tr>
+<tr>
+<td>GitHub code owners</td>
+<td>≥ 3 each in <code>@example-org/platform-engineering</code> and <code>@example-org/security</code></td>
+<td>CODEOWNERS</td>
+</tr>
+</tbody></table>
+<h3>A3. Tools on the engineer&#39;s workstation</h3>
+<pre><code class="language-bash">oc version --client        # 4.21 client
+kustomize version          # ≥ 5.4
+yamllint --version
+node --version             # for the diagram check only
+gh --version               # GitHub CLI for the ruleset
+logcli --version           # optional, for audit queries
+amtool --version           # optional; the runbooks exec it inside the Alertmanager pod
+</code></pre>
+<h3>A4. Fork/clone the repository and replace placeholders</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 1 h. <strong>Reference:</strong> <code>docs/00-placeholders.md</code>.</p>
+<ol>
+<li>Create the GitHub repository <code>example-org/openshift-administration</code> (or your names) and push this content to <code>main</code>.</li>
+<li>Replace every placeholder in one commit. The label prefix <code>guardrails.example.com</code> must be changed <strong>once, now</strong>, because it is baked into the CRD group and the CEL:<pre><code class="language-bash">NEW=guardrails.acme.io
+grep -RIl &#39;guardrails\.example\.com&#39; manifests docs scripts .github llm .claude AGENTS.md CLAUDE.md README.md html | xargs sed -i &quot;s/guardrails\.example\.com/${NEW}/g&quot;
+# then the org/repo, team names, e-mail addresses, SMTP host, SIEM URL, buckets, regions, storage class, cluster label
+</code></pre>
+</li>
+<li>Run the check at the bottom of <code>docs/00-placeholders.md</code>; it must print nothing except the <code>REPLACE_*</code> secret placeholders.</li>
+<li>Validate locally:<pre><code class="language-bash">for o in manifests/base manifests/overlays/*; do kustomize build &quot;$o&quot; &gt;/dev/null &amp;&amp; echo &quot;OK $o&quot;; done
+yamllint -c .yamllint manifests &amp;&amp; bash -n scripts/*.sh
+</code></pre>
+</li>
+</ol>
+<p><strong>Verify:</strong> all overlays build with the same object count (84). <strong>Evidence:</strong> the commit SHA.</p>
+<h3>A5. Protect the repository</h3>
+<p><strong>Who:</strong> GitHub org admin + platform engineer. <strong>Time:</strong> 30 min. <strong>Reference:</strong> <code>docs/08</code>, <code>.github/RULESET.md</code>.</p>
+<pre><code class="language-bash">gh api -X POST repos/example-org/openshift-administration/rulesets --input .github/ruleset-main.json
+gh api -X PATCH repos/example-org/openshift-administration -f allow_merge_commit=false -f allow_rebase_merge=false -f allow_squash_merge=true -f delete_branch_on_merge=true
+gh api -X PATCH repos/example-org/openshift-administration -f &#39;security_and_analysis[secret_scanning][status]=enabled&#39; -f &#39;security_and_analysis[secret_scanning_push_protection][status]=enabled&#39;
+</code></pre>
+<p>Populate the two code-owner teams. Optionally add the <code>PREPROD_KUBECONFIG</code> secret (a token for a read-only + dry-run service account on pre-prod) so CI can <code>oc apply --dry-run=server</code>.</p>
+<p><strong>Verify:</strong> <code>gh api repos/.../rules/branches/main --jq &#39;.[].type&#39;</code> lists <code>pull_request</code>, <code>required_status_checks</code>, <code>required_signatures</code>, <code>deletion</code>, <code>non_fast_forward</code>, <code>required_linear_history</code>. Open a throw-away PR and confirm the <code>validate</code> check runs and two approvals are required.</p>
+<p>From this point on, <strong>every change to the repository is a PR</strong>.</p>
+<hr>
+<h2>Part B · Platform prerequisites (per cluster; do pre-prod first)</h2>
+<h3>B1. Identity provider and groups</h3>
+<p><strong>Who:</strong> platform engineer + IdP team. <strong>Time:</strong> ½ day. <strong>Reference:</strong> <code>docs/03</code>.</p>
+<ol>
+<li>Confirm the IdP login works and yields a stable personal username: <code>oc whoami</code> → <code>alice@example.com</code>.</li>
+<li>Create the groups from the directory. Either an OIDC <code>groups</code> claim, or apply <code>manifests/07-hardening-extras/ldap-group-sync.example.yaml</code> after filling in the LDAP details and creating the <code>ldap-sync</code> / <code>ldap-ca</code> secrets. As a bootstrap only, <code>manifests/00-namespaces-and-groups/groups.yaml</code> can be applied with real usernames.</li>
+<li>Verify membership:<pre><code class="language-bash">oc get group gitops-deletion-approvers gitops-deletion-requesters platform-admins -o custom-columns=NAME:.metadata.name,USERS:.users
+</code></pre>
+</li>
+<li>Remove <code>kubeadmin</code> <strong>only after</strong> an IdP user with JIT <code>platform-admins</code> membership has successfully run an admin command:<pre><code class="language-bash">oc delete secret kubeadmin -n kube-system
+</code></pre>
+</li>
+<li>Move the installer&#39;s <code>auth/kubeconfig</code> into the vault under dual control and delete local copies.</li>
+</ol>
+<p><strong>Verify:</strong> <code>scripts/verify-install.sh</code> section &quot;Identity&quot; shows kubeadmin removed and ≥ 4 approvers. <strong>Rollback:</strong> kubeadmin cannot be recreated; this is why step 4 waits for a working IdP admin.</p>
+<h3>B2. Operators</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 1 h + operator install time. <strong>Reference:</strong> <code>docs/02</code>, <code>docs/07</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>Namespace</th>
+<th>Manifest</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OpenShift GitOps (already present)</td>
+<td><code>openshift-gitops-operator</code></td>
+<td>cluster-config repo</td>
+<td><code>oc get argocd openshift-gitops -n openshift-gitops</code></td>
+</tr>
+<tr>
+<td>OpenShift Logging 6.x</td>
+<td><code>openshift-logging</code></td>
+<td><code>manifests/01-audit/operators.yaml</code></td>
+<td><code>oc get csv -n openshift-logging</code> → Succeeded</td>
+</tr>
+<tr>
+<td>Loki Operator 6.x</td>
+<td><code>openshift-operators-redhat</code></td>
+<td>same file</td>
+<td><code>oc get csv -n openshift-operators-redhat</code></td>
+</tr>
+<tr>
+<td>OADP</td>
+<td><code>openshift-adp</code></td>
+<td><code>manifests/06-backup/oadp-dpa.yaml</code> (Subscription part)</td>
+<td><code>oc get csv -n openshift-adp</code></td>
+</tr>
+</tbody></table>
+<p>Verify channel names first: <code>oc get packagemanifest -n openshift-marketplace cluster-logging loki-operator redhat-oadp-operator -o custom-columns=NAME:.metadata.name,CHANNEL:.status.defaultChannel</code>, and adjust the <code>channel:</code> fields via PR if they differ.</p>
+<h3>B3. Object storage</h3>
+<p><strong>Who:</strong> cloud/storage team. <strong>Time:</strong> 1 h.</p>
+<p>Two buckets, versioning on, <strong>Object Lock</strong> (compliance mode) with retention ≥ 90 days for Loki and ≥ 30/90 days for OADP, IAM users without <code>DeleteObject</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Bucket</th>
+<th>Used by</th>
+<th>Secret</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ocp-audit-loki</code></td>
+<td>LokiStack</td>
+<td><code>openshift-logging/logging-loki-s3</code></td>
+</tr>
+<tr>
+<td><code>ocp-prod-eu-1-oadp</code></td>
+<td>OADP</td>
+<td><code>openshift-adp/cloud-credentials</code> (key <code>cloud</code>)</td>
+</tr>
+</tbody></table>
+<h3>B4. Secrets from the vault</h3>
+<p><strong>Who:</strong> platform engineer with vault access. <strong>Time:</strong> 1 h. Never commit these.</p>
+<table>
+<thead>
+<tr>
+<th>Secret</th>
+<th>Namespace</th>
+<th>Keys</th>
+<th>Source manifest to read</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>logging-loki-s3</code></td>
+<td><code>openshift-logging</code></td>
+<td><code>access_key_id</code>, <code>access_key_secret</code>, <code>bucketnames</code>, <code>endpoint</code>, <code>region</code></td>
+<td><code>manifests/01-audit/loki-s3-secret.example.yaml</code></td>
+</tr>
+<tr>
+<td><code>splunk-hec</code></td>
+<td><code>openshift-logging</code></td>
+<td><code>hecToken</code></td>
+<td><code>clusterlogforwarder-audit.yaml</code></td>
+</tr>
+<tr>
+<td><code>splunk-ca</code> (ConfigMap, optional)</td>
+<td><code>openshift-logging</code></td>
+<td><code>ca-bundle.crt</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>cloud-credentials</code></td>
+<td><code>openshift-adp</code></td>
+<td><code>cloud</code></td>
+<td><code>oadp-dpa.yaml</code></td>
+</tr>
+<tr>
+<td><code>alertmanager-main</code></td>
+<td><code>openshift-monitoring</code></td>
+<td><code>alertmanager.yaml</code>, <code>guardrail.tmpl</code></td>
+<td><code>manifests/05-alerting/alertmanager-main.yaml</code> (render with the SMTP password and Teams URL)</td>
+</tr>
+</tbody></table>
+<p>Create the Teams webhook first (Part B6) so its URL can be rendered into <code>alertmanager-main</code>.</p>
+<h3>B5. Audit profile</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 15 min + 15 min roll. <strong>Reference:</strong> <code>docs/02</code>.</p>
+<pre><code class="language-bash">oc apply --server-side --field-manager=guardrails -f manifests/01-audit/apiserver-audit.yaml
+oc get co kube-apiserver -w        # PROGRESSING=True while pods roll, then False
+oc get apiserver cluster -o jsonpath=&#39;{.spec.audit}&#39;; echo
+</code></pre>
+<p><strong>Verify:</strong> <code>oc adm node-logs --role=master --path=kube-apiserver/audit.log | tail -1 | python3 -m json.tool | grep -c requestObject</code> → a write event now carries <code>requestObject</code>. Watch <code>/var</code> usage on masters for a week. <strong>Rollback:</strong> patch <code>profile: Default</code> (after phase 3 this needs approvals by design).</p>
+<h3>B6. Microsoft Teams webhook and SMTP</h3>
+<p><strong>Who:</strong> Teams channel owner + platform engineer. <strong>Time:</strong> 30 min. <strong>Reference:</strong> <code>docs/06</code> §Teams.</p>
+<ol>
+<li>In the target channel: <strong>… → Workflows → &quot;Post to a channel when a webhook request is received&quot;</strong> → copy the URL. Store it in the vault.</li>
+<li>Confirm the SMTP relay (host, port 587, TLS, auth user) and a sender address; store the password in the vault.</li>
+<li>Render <code>alertmanager.yaml</code> and <code>guardrail.tmpl</code> from <code>manifests/05-alerting/alertmanager-main.yaml</code> with the real values, <strong>merging</strong> your existing receivers/routes, then:<pre><code class="language-bash">oc -n openshift-monitoring create secret generic alertmanager-main --from-file=alertmanager.yaml --from-file=guardrail.tmpl --dry-run=client -o yaml | oc replace -f -
+oc -n openshift-monitoring label secret alertmanager-main guardrails.example.com/critical=true --overwrite
+oc -n openshift-monitoring exec alertmanager-main-0 -c alertmanager -- amtool check-config /etc/alertmanager/config_out/alertmanager.env.yaml
+</code></pre>
+</li>
+<li>Fire the synthetic alert from <code>docs/06</code> (<code>amtool alert add ...</code>).</li>
+</ol>
+<p><strong>Verify:</strong> Teams card and e-mail within ~10 s; <code>[RESOLVED]</code> after 5 min. <strong>Evidence:</strong> screenshot of both. <strong>Rollback:</strong> restore the previous secret content (keep a copy before <code>oc replace</code>).</p>
+<h3>B7. Logging stack and forwarder</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 1 h. <strong>Reference:</strong> <code>docs/02</code>.</p>
+<pre><code class="language-bash">oc apply -f manifests/01-audit/lokistack.yaml                 # after editing storageClassName
+oc get lokistack logging-loki -n openshift-logging -w         # Ready
+oc apply -f manifests/01-audit/clusterlogforwarder-audit.yaml
+oc get clusterlogforwarder audit-forwarder -n openshift-logging -o jsonpath=&#39;{range .status.conditions[*]}{.type}={.status} {end}&#39;; echo
+oc get ds -n openshift-logging audit-forwarder                # pods on every node incl. masters
+</code></pre>
+<p><strong>Verify:</strong> audit lines in the SIEM index and in Loki (<code>sum(rate(loki_distributor_lines_received_total{tenant=&quot;audit&quot;}[5m]))</code> &gt; 0 in the console&#39;s Observe → Metrics). <strong>Rollback:</strong> delete the CLF (needs approvals after phase 3).</p>
+<h3>B8. Backups</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 30 min. <strong>Reference:</strong> <code>docs/07</code>.</p>
+<pre><code class="language-bash">oc apply -k manifests/06-backup
+oc -n openshift-adp get backupstoragelocation -o custom-columns=NAME:.metadata.name,PHASE:.status.phase
+oc -n openshift-adp create backup initial --from-schedule=gitops-6h &amp;&amp; oc -n openshift-adp get backup initial -w
+</code></pre>
+<p><strong>Verify:</strong> phase <code>Completed</code>, items &gt; 0. Do the restore drill from <code>docs/07</code> once now, so the first real restore is not the first ever.</p>
+<hr>
+<h2>Part C · Bootstrap on pre-production (phase 1, audit only)</h2>
+<p>Nothing in phase 1 blocks anything. It installs every object, stamps audit annotations, and lets you observe.</p>
+<h3>C1. Apply phase 1 by hand (once)</h3>
+<p><strong>Who:</strong> platform engineer with JIT <code>platform-admins</code>. <strong>Time:</strong> 30 min.</p>
+<pre><code class="language-bash">oc apply --server-side --field-manager=guardrails -k manifests/overlays/phase1-audit
+</code></pre>
+<p>The order inside the base handles CRD-before-CR. If the <code>GuardrailConfig</code> apply races the CRD, re-run the command.</p>
+<p><strong>Verify:</strong></p>
+<pre><code class="language-bash">oc get vap,vapb -l app.kubernetes.io/part-of=guardrails
+oc get vap guardrails-critical-delete -o jsonpath=&#39;{.status.conditions[?(@.type==&quot;Ready&quot;)].status}&#39;; echo    # True
+oc get vap guardrails-critical-delete -o jsonpath=&#39;{.status.typeChecking}&#39; | head -c 600; echo               # warnings OK, errors not
+oc get vapb -l app.kubernetes.io/part-of=guardrails -o custom-columns=NAME:.metadata.name,ACTIONS:.spec.validationActions   # [Audit] on deletion/label/gitops-only bindings
+scripts/verify-install.sh
+</code></pre>
+<p><strong>Rollback:</strong> <code>oc delete -k manifests/overlays/phase1-audit</code> (only in phase 1/2; later it needs approvals by design).</p>
+<h3>C2. Run the automated matrix in phase-1 mode</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 20 min. <strong>Reference:</strong> <code>docs/11</code>.</p>
+<pre><code class="language-bash">scripts/test-guardrails.sh
+</code></pre>
+<p>The script is phase-aware and must PASS in phase 1 (deny cases are expected to succeed); the evidence is the audit annotation and the <code>CriticalDeleteWouldBeDenied</code> alerts. Confirm with:</p>
+<pre><code class="language-logql">{log_type=&quot;audit&quot;} | json | objectRef_namespace=&quot;guardrails-test&quot; | annotations_validation_policy_admission_k8s_io_validation_failure=~&quot;.+&quot;
+</code></pre>
+<p><strong>Evidence:</strong> <code>evidence-&lt;ts&gt;.log</code> plus the LogQL output attached to the ticket.</p>
+<h3>C3. Answer residual risk R3</h3>
+<p><strong>Who:</strong> platform engineer. <strong>Time:</strong> 10 min.</p>
+<pre><code class="language-bash">oc delete validatingadmissionpolicybinding guardrails-critical-delete-named --dry-run=server
+</code></pre>
+<p>Check whether the audit event carries the <code>validation_failure</code> annotation (the policy evaluated its own kind) or not. Record the answer in <code>docs/01</code> §Residual-risk register and <code>llm/memory.md</code>.</p>
+<h3>C4. Prove alert delivery end to end</h3>
+<p><strong>Who:</strong> platform engineer + on-call. <strong>Time:</strong> 30 min. <strong>Reference:</strong> <code>docs/14</code> §9.</p>
+<p>Delete a labelled scratch ConfigMap through the full workflow (T5.1). Time: audit <code>requestReceivedTimestamp</code> → Alertmanager <code>startsAt</code> → Teams post. Target ≤ 60 s. Also confirm <code>CriticalResourceDeleteDenied</code> (phase 1 shows it as the would-have-been-denied signal) and <code>ImpersonationUsed</code> if you used impersonation.</p>
+<p><strong>Evidence:</strong> screenshots and timings.</p>
+<hr>
+<h2>Part D · Hand the guardrails to Argo CD</h2>
+<h3>D1. Harden the ArgoCD CR</h3>
+<p><strong>Who:</strong> platform engineer (Argo CD admin). <strong>Time:</strong> 30 min. <strong>Reference:</strong> <code>docs/05</code>.</p>
+<pre><code class="language-bash">oc apply --server-side --field-manager=guardrails -f manifests/04-argocd/argocd-cr-hardening-patch.yaml
+oc get argocd openshift-gitops -n openshift-gitops -o jsonpath=&#39;{.spec.disableAdmin} {.spec.rbac.defaultPolicy}{&quot;\n&quot;}&#39;   # true role:readonly
+</code></pre>
+<p>Log in to the Argo CD UI via SSO; confirm <code>gitops-operators</code> cannot delete an Application (button disabled / 403).</p>
+<h3>D2. Create the AppProject and the app-of-apps</h3>
+<pre><code class="language-bash">oc apply -f manifests/04-argocd/appproject-guardrails.yaml
+oc apply -f manifests/04-argocd/application-guardrails.yaml      # spec.source.path = manifests/overlays/phase1-audit at this point
+oc get application guardrails -n openshift-gitops -o jsonpath=&#39;{.status.sync.status} {.status.health.status}{&quot;\n&quot;}&#39;   # Synced Healthy
+</code></pre>
+<p>From now on Argo CD owns every object under <code>manifests/</code>; do not <code>oc apply</code> them by hand again.</p>
+<h3>D3. Prove self-protection and self-heal</h3>
+<p>As a JIT admin, <code>oc patch validatingadmissionpolicybinding guardrails-critical-delete-labelled --type merge -p &#39;{&quot;spec&quot;:{&quot;validationActions&quot;:[&quot;Audit&quot;]}}&#39;</code> → denied by the hardened binding (T8.1). Then, using break-glass on pre-prod only, make the same patch, wait ≤ 3 min, confirm Argo CD reverted it and <code>GuardrailPolicyModified</code> + <code>BreakGlassUsed</code> reached Teams.</p>
+<h3>D4. Remove cascade finalizers from existing production Applications</h3>
+<p><strong>Who:</strong> Argo CD operators, per application owner. <strong>Time:</strong> varies. <strong>Reference:</strong> <code>docs/05</code> §Applications.</p>
+<pre><code class="language-bash">oc get application -n openshift-gitops -o custom-columns=NAME:.metadata.name,FINALIZERS:.metadata.finalizers,PRUNE:.spec.syncPolicy.automated.prune
+# for each production app that should NOT cascade:
+oc -n openshift-gitops patch application &lt;app&gt; --type json -p &#39;[{&quot;op&quot;:&quot;remove&quot;,&quot;path&quot;:&quot;/metadata/finalizers&quot;}]&#39;
+</code></pre>
+<p>Label production Applications and ApplicationSets <code>guardrails.example.com/critical=true</code> in Git and set <code>preserveResourcesOnDeletion: true</code> on ApplicationSets (snippet in <code>manifests/04-argocd/applicationset-defaults-snippet.yaml</code>). <code>prune: true</code> stays where the application repository enforces two reviewers. Do this through the application repositories&#39; own PRs.</p>
+<hr>
+<h2>Part E · Phase gates</h2>
+<p>Each promotion is one PR that changes <code>spec.source.path</code> in <code>manifests/04-argocd/application-guardrails.yaml</code>. Argo CD applies the new <code>validationActions</code>. <strong>Reference:</strong> <code>docs/10</code> (criteria), <code>.claude/skills/guardrail-rollout/SKILL.md</code> (procedure).</p>
+<h3>E1. Phase 1 → 2 (warn)</h3>
+<p><strong>Gate:</strong> VAP <code>Ready=True</code>; R3 recorded; 7 consecutive days with zero unexplained <code>CriticalResourceDeleteDenied</code>/<code>ArgoCDDirectMutation</code> events (every one either became a workflow adoption or an identity added to <code>gitopsServiceAccounts</code>/<code>reaperUsers</code> by PR, never a human in <code>exemptUsers</code>); every approver has run <code>scripts/approve-deletion.sh</code> on a scratch object.
+<strong>Do:</strong> PR <code>path: manifests/overlays/phase2-warn</code>. After merge: <code>oc get vapb ... -o custom-columns=NAME:.metadata.name,ACTIONS:.spec.validationActions</code> shows <code>[Warn Audit]</code>.
+<strong>Verify:</strong> T15 (<code>oc delete ... --dry-run=server</code> prints the <code>Warning:</code> line and succeeds).</p>
+<h3>E2. Phase 2 → 3 (enforce)</h3>
+<p><strong>Gate:</strong> 7 days with zero warnings from pipelines and operators; on-call acknowledged a synthetic red alert; <code>scripts/test-guardrails.sh</code> PASS on pre-prod (all cases); break-glass rehearsal ≤ 30 days (T13); restore drill ≤ 90 days (T16); runbooks read by the on-call rotation.
+<strong>Do:</strong> change window; PR <code>path: manifests/overlays/phase3-enforce</code>. Note that the self-protection set (<code>-hardened</code> binding) has been enforced since phase 1; phase 3 adds the two-person rule for every other critical object.
+<strong>Verify immediately:</strong></p>
+<pre><code class="language-bash">oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server      # Error ... GUARDRAIL DENIED
+scripts/verify-install.sh
+scripts/test-guardrails.sh                                                   # all PASS
+</code></pre>
+<p><strong>Rollback:</strong> reverse PR (two approvals; Argo CD applies it). Emergency only: break-glass edits <code>validationActions</code> (alerted, incident, post-mortem).</p>
+<h3>E3. Phase 3 → 4 (GitOps-only mutation)</h3>
+<p><strong>Gate:</strong> 14 days with zero <code>ArgoCDDirectMutation</code>; every controller that legitimately writes critical objects is in <code>gitopsServiceAccounts</code> (Argo CD server/controller/appset, GitOps operator, and if applicable External Secrets, Velero).
+<strong>Do:</strong> PR <code>path: manifests/overlays/phase4-gitops-only</code>.
+<strong>Verify:</strong> T2.2 now denies a human edit; UI sync of a critical Application still works (T-case 26 in the study guide&#39;s catalogue).</p>
+<hr>
+<h2>Part F · Production</h2>
+<p>Repeat Parts B (per cluster), C, D and E on production with these differences:</p>
+<ol>
+<li>Use a change ticket per phase; phase 3 in a change window with the security team on the bridge.</li>
+<li>Run the sign-off matrix with <strong>real user logins</strong> (<code>IMPERSONATE=false</code>, four kubeconfigs) so no <code>ImpersonationUsed</code> alerts are generated on production.</li>
+<li>Set the forwarder&#39;s <code>cluster</code> label to the production cluster identifier and route production alerts to the production Teams channel (a second <code>msteamsv2_configs</code> receiver and a <code>matchers: [cluster=&quot;prod-...&quot;]</code> route if you want per-cluster channels).</li>
+<li>Keep the pre-prod cluster at the same phase as production or one ahead; run the matrix there after every OpenShift, Logging, GitOps or Loki operator upgrade before upgrading production.</li>
+</ol>
+<hr>
+<h2>Part G · Operate</h2>
+<h3>G1. Hand-over checklist</h3>
+<ul>
+<li><input disabled="" type="checkbox"> On-call rotation has read <code>docs/09</code> (runbooks) and can find the Teams channel and e-mail list.</li>
+<li><input disabled="" type="checkbox"> Approvers know <code>scripts/approve-deletion.sh</code>; requesters know <code>request</code>/<code>execute</code>/<code>cancel</code>.</li>
+<li><input disabled="" type="checkbox"> Break-glass custodians named, vault dual-control policy tested, rehearsal date recorded.</li>
+<li><input disabled="" type="checkbox"> <code>docs/12</code> recurring activities scheduled in the team calendar (monthly synthetic alert, quarterly recertification, quarterly restore drill, per-upgrade test run).</li>
+<li><input disabled="" type="checkbox"> <code>llm/memory.md</code> state log updated with the phase per cluster and the last test run.</li>
+<li><input disabled="" type="checkbox"> Compliance evidence folder created (per <code>docs/11</code> §Evidence).</li>
+</ul>
+<h3>G2. Adding a new critical object later</h3>
+<ol>
+<li>Label it in Git (<code>guardrails.example.com/critical: &quot;true&quot;</code>); if it is a new kind, add the kind to the three policies&#39; <code>matchConstraints</code>, the reaper&#39;s resource list, the RBAC roles, the test matrix and <code>docs/04</code>. PR with security review.</li>
+<li>If a controller writes it, add the controller&#39;s service account to <code>gitopsServiceAccounts</code> (never to <code>exemptUsers</code>).</li>
+</ol>
+<h3>G3. Removing a critical object later</h3>
+<p>Run the workflow (<code>docs/09</code> §Request), then remove it from Git in the same change window.</p>
+<hr>
+<h2>Appendix 1 · Tracking table</h2>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Done</th>
+<th>Date</th>
+<th>By</th>
+<th>Evidence (ticket / SHA / screenshot)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A1 decisions</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>A2 people and groups</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>A3 tools</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>A4 placeholders replaced, local build OK</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>A5 ruleset, teams, secret scanning</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B1 IdP, groups, kubeadmin removed, kubeconfig vaulted</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B2 operators</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B3 buckets with Object Lock</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B4 secrets created</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B5 audit profile, roll complete</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B6 Teams + SMTP, synthetic alert received</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B7 LokiStack + forwarder Ready, lines flowing</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>B8 first backup Completed, restore drill</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>C1 phase 1 applied, verify-install PASS</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>C2 matrix run, annotations observed</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>C3 R3 answered</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>C4 end-to-end alert timing ≤ 60 s</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>D1 ArgoCD CR hardened</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>D2 AppProject + Application Synced</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>D3 self-protection + self-heal proven</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>D4 finalizers removed, apps labelled</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>E1 phase 2</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>E2 phase 3</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>E3 phase 4</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>F production, per cluster</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>G1 hand-over</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody></table>
+<h2>Appendix 2 · Command index</h2>
+<table>
+<thead>
+<tr>
+<th>Purpose</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Build everything locally</td>
+<td><code>for o in manifests/base manifests/overlays/*; do kustomize build &quot;$o&quot; &gt;/dev/null &amp;&amp; echo &quot;OK $o&quot;; done</code></td>
+</tr>
+<tr>
+<td>Lint</td>
+<td><code>yamllint -c .yamllint manifests</code></td>
+</tr>
+<tr>
+<td>Apply a phase by hand (bootstrap only)</td>
+<td><code>oc apply --server-side --field-manager=guardrails -k manifests/overlays/phase1-audit</code></td>
+</tr>
+<tr>
+<td>Health</td>
+<td><code>scripts/verify-install.sh</code></td>
+</tr>
+<tr>
+<td>Automated matrix</td>
+<td><code>scripts/test-guardrails.sh</code> (<code>IMPERSONATE=false ...</code> for sign-off)</td>
+</tr>
+<tr>
+<td>Smoke test (must deny in phase ≥ 3)</td>
+<td><code>oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server</code></td>
+</tr>
+<tr>
+<td>Current phase</td>
+<td><code>oc get application guardrails -n openshift-gitops -o jsonpath=&#39;{.spec.source.path}&#39;</code></td>
+</tr>
+<tr>
+<td>Binding actions</td>
+<td><code>oc get vapb -l app.kubernetes.io/part-of=guardrails -o custom-columns=NAME:.metadata.name,ACTIONS:.spec.validationActions</code></td>
+</tr>
+<tr>
+<td>Deletion workflow</td>
+<td><code>scripts/request-deletion.sh</code>, <code>approve-deletion.sh</code> ×2, <code>execute-deletion.sh</code>, <code>cancel-deletion.sh</code></td>
+</tr>
+<tr>
+<td>Who did what</td>
+<td><code>scripts/audit-query.sh &lt;name&gt;</code></td>
+</tr>
+<tr>
+<td>Synthetic alert</td>
+<td>see <code>docs/06</code> §Teams</td>
+</tr>
+</tbody></table>
+<h2>Appendix 3 · Where each requirement is proven</h2>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Implemented by</th>
+<th>Proven by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Audit trail with who/what/when and bodies</td>
+<td>B5, B7</td>
+<td>C2 LogQL evidence; <code>docs/14</code> §2</td>
+</tr>
+<tr>
+<td>No single person deletes a critical object</td>
+<td>C1 (phase 3 via E2)</td>
+<td><code>docs/14</code> §3, §4</td>
+</tr>
+<tr>
+<td>Argo CD protected on all three paths</td>
+<td>C1, D1, D2, D4</td>
+<td><code>docs/14</code> §3.4–3.6, §7</td>
+</tr>
+<tr>
+<td>Alerts to e-mail and Teams in seconds</td>
+<td>B6, B7</td>
+<td>B6 synthetic, C4 timing, <code>docs/14</code> §9</td>
+</tr>
+<tr>
+<td>Recoverable</td>
+<td>B8</td>
+<td><code>docs/14</code> §16</td>
+</tr>
+<tr>
+<td>Control cannot be quietly disabled</td>
+<td>A5, D3</td>
+<td><code>docs/14</code> §8, §11</td>
+</tr>
+</tbody></table>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/15-implementation-guide.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

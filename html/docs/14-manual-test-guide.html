@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14-manual-test-guide · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>14 · Manual test guide</h1>
+<p>A step-by-step guide any operator can follow to prove every control, positive and negative, with the exact commands and the output to expect. Trust model reminder: the <strong>GitOps path</strong> (a merged PR applied by the Argo CD controllers) is pre-approved; every test below exercises the <strong>out-of-band</strong> path unless it says otherwise. The control-to-test traceability matrix is in <code>docs/16</code>. Run it in full on pre-prod before phase 3, and the marked subset (★) on production after each phase change and after every OpenShift, Logging or GitOps upgrade. Record results in the table in §17 and attach the evidence to the change ticket.</p>
+<p>Conventions: <code>$</code> = run as the identity named in the step. Expected output is shown after <code>→</code>. Where output contains timestamps, names or UIDs, only the shape matters. <code>PFX</code> is the annotation prefix (<code>guardrails.example.com</code> until you replaced it).</p>
+<h2>0. Prerequisites and test identities</h2>
+<p>You need four personal IdP accounts (never shared accounts):</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Example user</th>
+<th>Group membership</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Requester / executor</td>
+<td><code>req@example.com</code></td>
+<td><code>gitops-deletion-requesters</code></td>
+</tr>
+<tr>
+<td>Approver 1</td>
+<td><code>a1@example.com</code></td>
+<td><code>gitops-deletion-approvers</code></td>
+</tr>
+<tr>
+<td>Approver 2</td>
+<td><code>a2@example.com</code></td>
+<td><code>gitops-deletion-approvers</code></td>
+</tr>
+<tr>
+<td>Admin (has cluster-admin, e.g. JIT <code>platform-admins</code>)</td>
+<td><code>admin@example.com</code></td>
+<td><code>platform-admins</code></td>
+</tr>
+<tr>
+<td>Developer (no guardrail role)</td>
+<td><code>dev@example.com</code></td>
+<td>none (plus a test RoleBinding <code>edit</code> in <code>guardrails-test</code>)</td>
+</tr>
+</tbody></table>
+<p>Log each one in once and save a kubeconfig per identity:</p>
+<pre><code class="language-bash">$ oc login --server=https://api.&lt;cluster&gt;:6443 -u req@example.com    # repeat for a1, a2, admin
+$ oc config view --minify --flatten &gt; ~/.kube/req.kubeconfig          # and a1 / a2 / admin
+</code></pre>
+<p>Helpers used throughout:</p>
+<pre><code class="language-bash">export PFX=guardrails.example.com
+export NS=guardrails-test
+alias as-req=&#39;KUBECONFIG=~/.kube/req.kubeconfig oc&#39;
+alias as-a1=&#39;KUBECONFIG=~/.kube/a1.kubeconfig oc&#39;
+alias as-a2=&#39;KUBECONFIG=~/.kube/a2.kubeconfig oc&#39;
+alias as-admin=&#39;KUBECONFIG=~/.kube/admin.kubeconfig oc&#39;
+alias as-dev=&#39;KUBECONFIG=~/.kube/dev.kubeconfig oc&#39;
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+state() { oc -n $NS get cm &quot;$1&quot; -o go-template=&#39;{{range $k,$v := .metadata.annotations}}{{if hasPrefix $k &quot;guardrails.&quot;}}{{$k}}={{$v}}{{&quot;\n&quot;}}{{end}}{{end}}&#39;; }
+approvals() { oc -n $NS get cm &quot;$1&quot; -o go-template=&quot;{{with .metadata.annotations}}{{with index . \&quot;$PFX/delete-approvals\&quot;}}{{.}}{{end}}{{end}}&quot;; }
+</code></pre>
+<p>Confirm the platform state before testing:</p>
+<pre><code class="language-bash">$ as-admin get guardrailconfig default -o jsonpath=&#39;{.spec.minApprovers} {.spec.executorMayBeApprover}{&quot;\n&quot;}&#39;
+→ 2 false
+$ as-admin get vapb -l app.kubernetes.io/part-of=guardrails -o custom-columns=NAME:.metadata.name,ACTIONS:.spec.validationActions
+→ guardrails-critical-delete-labelled        [Deny Audit]      (phase 3/4; [Audit] in phase 1; [Warn Audit] in phase 2)
+  guardrails-critical-delete-named           [Deny Audit]
+  guardrails-critical-label-control          [Deny Audit]      (follows the deletion bindings)
+  guardrails-gitops-only-mutation            [Audit]           ([Deny Audit] in phase 4)
+  guardrails-gitops-only-mutation-hardened   [Deny Audit]      (every phase)
+  guardrails-rbac-escalation-audit           [Warn Audit]
+$ as-admin get vap guardrails-critical-delete -o jsonpath=&#39;{.status.conditions}{&quot;\n&quot;}&#39;
+→ (empty, or no condition with status False)   # type-checking warnings live in .status.typeChecking and are expected
+$ as-admin get group gitops-deletion-approvers -o jsonpath=&#39;{.users}{&quot;\n&quot;}&#39;
+→ [&quot;a1@example.com&quot;,&quot;a2@example.com&quot;, ...]
+</code></pre>
+<p>Create the scratch objects. The workflow roles are namespaced, so the test namespace needs its own RoleBindings, and only an <strong>approver</strong> may add the critical label (label control):</p>
+<pre><code class="language-bash">$ as-admin create ns $NS
+$ as-admin -n $NS create rolebinding test-approvers --clusterrole=guardrails-approver-namespaced --group=gitops-deletion-approvers --group=gitops-deletion-requesters
+$ as-admin -n $NS create rolebinding test-executors --clusterrole=guardrails-executor-namespaced --group=gitops-deletion-requesters
+$ as-admin -n $NS create role test-cm --verb=get,list,patch,delete --resource=configmaps
+$ as-admin -n $NS create rolebinding test-cm --role=test-cm --group=gitops-deletion-approvers --group=gitops-deletion-requesters
+$ as-admin -n $NS create rolebinding test-dev --clusterrole=edit --user=dev@example.com
+$ as-admin -n $NS create configmap victim --from-literal=a=b
+$ as-a1 -n $NS label configmap victim $PFX/critical=true
+$ as-admin -n $NS create configmap bystander --from-literal=a=b
+$ as-admin -n $NS get cm --show-labels
+→ NAME        DATA   AGE   LABELS
+  bystander   1      5s    &lt;none&gt;
+  victim      1      9s    guardrails.example.com/critical=true
+</code></pre>
+<p>Open a second terminal that tails the audit stream so you can see every decision live (optional but recommended):</p>
+<pre><code class="language-bash">$ logcli query --org-id=audit --tail &#39;{log_type=&quot;audit&quot;} | json | objectRef_namespace=&quot;guardrails-test&quot; | line_format &quot;{{.verb}} {{.objectRef_name}} by {{.user_username}} rc={{.responseStatus_code}} :: {{.annotations_guardrails_critical_delete_decision}} :: {{.annotations_validation_policy_admission_k8s_io_validation_failure}}&quot;&#39;
+</code></pre>
+<h2>1. Phase-1 behaviour (audit only) — run once during phase 1</h2>
+<p><strong>T1.1 – a would-be-denied delete succeeds but is annotated.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS delete configmap victim --dry-run=server
+→ configmap &quot;victim&quot; deleted (server dry run)
+</code></pre>
+<p>In the audit tail:</p>
+<pre><code>→ delete victim by admin@example.com rc=200 :: op=DELETE user=admin@example.com ... approved=false exempt=false :: [{&quot;message&quot;:&quot;GUARDRAIL DENIED: ...&quot;,&quot;policy&quot;:&quot;guardrails-critical-delete&quot;,&quot;binding&quot;:&quot;guardrails-critical-delete-named&quot;,&quot;expressionIndex&quot;:0,&quot;validationActions&quot;:[&quot;Audit&quot;]}]
+</code></pre>
+<p>Pass = <code>rc=200</code> <strong>and</strong> the <code>validation_failure</code> annotation is present. This is the evidence phase 1 collects.</p>
+<h2>2. Baseline: non-critical objects are untouched ★</h2>
+<p><strong>T2.1</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS delete configmap bystander
+→ configmap &quot;bystander&quot; deleted
+</code></pre>
+<p>Audit tail: <code>delete bystander by admin@example.com rc=200 :: :: </code> (both annotations empty; the policy did not consider it critical).</p>
+<p><strong>T2.2 – RBAC least privilege (Tier B is out of reach for every workflow role).</strong></p>
+<pre><code class="language-bash">$ as-a1 -n openshift-gitops get secret openshift-gitops-cluster
+→ Error from server (Forbidden): secrets &quot;openshift-gitops-cluster&quot; is forbidden: User &quot;a1@example.com&quot; cannot get resource &quot;secrets&quot; in API group &quot;&quot; in the namespace &quot;openshift-gitops&quot;
+$ as-req delete namespace $NS --dry-run=server
+→ Error from server (Forbidden): namespaces &quot;guardrails-test&quot; is forbidden: User &quot;req@example.com&quot; cannot delete resource &quot;namespaces&quot; ...
+$ as-a1 get secrets -A
+→ Error from server (Forbidden): secrets is forbidden: User &quot;a1@example.com&quot; cannot list resource &quot;secrets&quot; in API group &quot;&quot; at the cluster scope
+$ as-a1 -n openshift-gitops delete application guardrails --dry-run=server
+→ Error from server (Forbidden): ... cannot delete resource &quot;applications&quot; ...          (approvers have no delete verb)
+</code></pre>
+<p><strong>T2.3 – ordinary updates to critical objects that do not touch guardrail annotations are allowed for trusted identities and flagged (not blocked) for humans in phases 1–3.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS annotate configmap victim team=platform --overwrite
+→ configmap/victim annotated
+</code></pre>
+<p>(Phase 4: <code>→ Error from server (Forbidden): ... guardrails-gitops-only-mutation ... may only be changed through Git (Argo CD)</code>.) Audit tail shows <code>annotations_guardrails_gitops_only_mutation_direct_mutation</code> populated; Teams receives <code>ArgoCDDirectMutation</code> (warning) within ~1 min.</p>
+<h2>3. No single identity can delete a critical object ★</h2>
+<p>Each command must be <strong>denied</strong> with <code>Error from server (Forbidden)</code> and a <code>GUARDRAIL DENIED</code> message naming the policy and binding.</p>
+<p><strong>T3.1 – cluster-admin deletes the labelled ConfigMap.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS delete configmap victim
+→ Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39; with binding &#39;guardrails-critical-delete-labelled&#39; denied request: GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim requires a delete-request and at least 2 distinct approvals from gitops-deletion-approvers (found 0, requested-by=, executor may not be an approver). Runbook: https://.../docs/09-runbooks.md
+</code></pre>
+<p>Teams/email: <code>CriticalResourceDeleteDenied</code> (warning) with actor and object within ~1 min.</p>
+<p><strong>T3.2 – cluster-admin removes the critical label (&quot;unlabel then delete&quot;).</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS label configmap victim $PFX/critical-
+→ Error from server (Forbidden): ... denied request: GUARDRAIL DENIED: removing the guardrails.example.com/critical label requires the same approvals as a deletion.
+</code></pre>
+<p><strong>T3.3 – delete by label selector / delete collection.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS delete configmap -l $PFX/critical=true
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim ...
+</code></pre>
+<p><strong>T3.4 – the Argo CD instance (server dry-run still goes through admission; nothing is deleted).</strong></p>
+<pre><code class="language-bash">$ as-admin -n openshift-gitops delete argocd openshift-gitops --dry-run=server
+→ Error from server (Forbidden): argocds.argoproj.io &quot;openshift-gitops&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39; with binding &#39;guardrails-critical-delete-named&#39; denied request: GUARDRAIL DENIED: deleting critical argocds openshift-gitops/openshift-gitops requires ...
+</code></pre>
+<p><strong>T3.5 – the GitOps namespace.</strong></p>
+<pre><code class="language-bash">$ as-admin delete namespace openshift-gitops --dry-run=server
+→ Error from server (Forbidden): namespaces &quot;openshift-gitops&quot; is forbidden: ... GUARDRAIL DENIED: deleting critical namespaces openshift-gitops requires ...
+</code></pre>
+<p>(Do not test <code>oc delete project</code> with <code>--dry-run</code> outside phase 3: dry-run propagation from the project API to the namespace delete is not guaranteed and in phase 1/2 it could really delete the namespace.)</p>
+<p><strong>T3.6 – the Argo CD CRDs and the operator.</strong></p>
+<pre><code class="language-bash">$ as-admin delete crd applications.argoproj.io --dry-run=server
+→ Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io &quot;applications.argoproj.io&quot; is forbidden: ... GUARDRAIL DENIED: deleting critical customresourcedefinitions applications.argoproj.io ...
+$ as-admin -n openshift-gitops-operator delete subscription openshift-gitops-operator --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical subscriptions openshift-gitops-operator/openshift-gitops-operator ...
+$ as-admin -n openshift-gitops-operator delete csv -l operators.coreos.com/openshift-gitops-operator.openshift-gitops-operator --dry-run=server
+→ Error from server (Forbidden): ... clusterserviceversions ...
+</code></pre>
+<p><strong>T3.7 – the guardrail itself: deletion (records residual risk R3) and the hardened binding (every phase).</strong></p>
+<pre><code class="language-bash">$ as-admin patch validatingadmissionpolicybinding guardrails-critical-delete-labelled --type merge -p &#39;{&quot;spec&quot;:{&quot;validationActions&quot;:[&quot;Audit&quot;]}}&#39; --dry-run=server
+→ Error from server (Forbidden): ... ValidatingAdmissionPolicy &#39;guardrails-gitops-only-mutation&#39; with binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request: GUARDRAIL: critical validatingadmissionpolicybindings guardrails-critical-delete-labelled may only be changed through Git (Argo CD) ...
+$ as-admin patch guardrailconfig default --type merge -p &#39;{&quot;spec&quot;:{&quot;exemptUsers&quot;:[&quot;system:apiserver&quot;,&quot;admin@example.com&quot;]}}&#39; --dry-run=server
+→ Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...
+$ as-a1 patch group platform-admins --type merge -p &#39;{&quot;users&quot;:[&quot;a1@example.com&quot;]}&#39; --dry-run=server
+→ Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...
+$ as-a1 -n guardrails-system patch cronjob approval-reaper --type merge -p &#39;{&quot;spec&quot;:{&quot;jobTemplate&quot;:{&quot;spec&quot;:{&quot;template&quot;:{&quot;spec&quot;:{&quot;serviceAccountName&quot;:&quot;breakglass&quot;}}}}}}&#39; --dry-run=server
+→ Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...
+$ as-a1 annotate guardrailconfig default $PFX/delete-request=&quot;CHG-x: rehearsal&quot; $PFX/delete-requested-by=a1@example.com --overwrite --dry-run=server
+→ guardrailconfig.guardrails.example.com/default annotated (server dry run)            (approval annotations remain allowed)
+</code></pre>
+<pre><code class="language-bash">$ as-admin delete validatingadmissionpolicybinding guardrails-critical-delete-named --dry-run=server
+→ EITHER  Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical validatingadmissionpolicybindings guardrails-critical-delete-named ...
+   OR     validatingadmissionpolicybinding.admissionregistration.k8s.io &quot;guardrails-critical-delete-named&quot; deleted (server dry run)
+</code></pre>
+<p>If the second: VAP on your build does not evaluate its own kind. Note it in <code>docs/01</code> R3 and <code>llm/memory.md</code>; then prove the compensating layers: as a non-admin, <code>as-a1 delete vapb guardrails-critical-delete-named --dry-run=server</code> → <code>Error from server (Forbidden): ... User &quot;a1@example.com&quot; cannot delete resource ...</code> (RBAC); and T8 (self-heal + alert).</p>
+<pre><code class="language-bash">$ as-admin delete guardrailconfig default --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical guardrailconfigs default ...
+$ as-admin delete group gitops-deletion-approvers --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical groups gitops-deletion-approvers ...
+$ as-admin delete clusterrolebinding guardrails-approvers --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical clusterrolebindings guardrails-approvers ...
+</code></pre>
+<p><strong>T3.8 – downgrading the audit profile needs approvals.</strong></p>
+<pre><code class="language-bash">$ as-admin patch apiserver cluster --type merge -p &#39;{&quot;spec&quot;:{&quot;audit&quot;:{&quot;profile&quot;:&quot;Default&quot;}}}&#39; --dry-run=server
+→ Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...   (APIServer/cluster is in the self-protection set: every phase)
+</code></pre>
+<p>A dry-run is audited like a real request, so <code>AuditProfileChanged</code> may fire for the attempt; a real change through Git (Argo CD) does not page.</p>
+<p><strong>T3.9 – the audit forwarder and the alert rules.</strong></p>
+<pre><code class="language-bash">$ as-admin -n openshift-logging delete clusterlogforwarder audit-forwarder --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical clusterlogforwarders openshift-logging/audit-forwarder ...
+$ as-admin -n openshift-logging delete alertingrule guardrails-audit-alerts --dry-run=server
+→ Error from server (Forbidden): ... GUARDRAIL DENIED ...
+</code></pre>
+<p><strong>T3.10 – only trusted identities may mark an object critical.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS create configmap tenant --from-literal=a=b
+$ as-req -n $NS label configmap tenant $PFX/critical=true
+→ Error from server (Forbidden): configmaps &quot;tenant&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-label-control&#39; with binding &#39;guardrails-critical-label-control&#39; denied request: GUARDRAIL DENIED: only Argo CD, break-glass or members of gitops-deletion-approvers may mark an object as critical ...
+$ as-a1 -n $NS label configmap tenant $PFX/critical=true
+→ configmap/tenant labeled
+</code></pre>
+<p>(cluster-admin without approver membership is denied too; Argo CD applying the label from Git is allowed.)</p>
+<pre><code class="language-bash">$ as-dev -n $NS create configmap precreated --from-literal=a=b --dry-run=server -o yaml | grep -q . &amp;&amp; echo created   # unlabelled: fine
+$ as-dev -n $NS apply --dry-run=server -f - &lt;&lt;EOF2
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: precreated2, labels: { guardrails.example.com/critical: &quot;true&quot; } }
+EOF2
+→ Error from server (Forbidden): ... &#39;guardrails-critical-label-control&#39; ... GUARDRAIL DENIED: only Argo CD, break-glass or members of gitops-deletion-approvers may mark an object as critical   (CREATE is covered too)
+</code></pre>
+<h2>4. Forged, duplicate and out-of-order approvals are rejected ★</h2>
+<p><strong>T4.1 – admin writes two approvals directly.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts),a2@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... denied request: GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by admin@example.com. Rules: append exactly one entry &quot;&lt;your-username&gt;|&lt;RFC3339 UTC&gt;&quot;, be a member of gitops-deletion-approvers, not be the requester, not approve twice, change nothing else in the object. Clearing the annotation is always allowed.
+</code></pre>
+<p><strong>T4.2 – request opened in someone else&#39;s name.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: test&quot; &quot;$PFX/delete-requested-by=a1@example.com&quot;
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change by req@example.com. delete-requested-by must equal your username, you must be in gitops-deletion-requesters,gitops-operators,gitops-deletion-approvers, delete-request must be non-empty, approvals must be empty when the request changes, and nothing else may change.
+</code></pre>
+<p><strong>T4.3 – request by someone outside the requester/approver groups</strong> (use any ordinary user, e.g. <code>dev@example.com</code> with <code>patch</code> rights via a test RoleBinding, or skip if none).</p>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/dev.kubeconfig oc -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: x&quot; &quot;$PFX/delete-requested-by=dev@example.com&quot;
+→ Error from server (Forbidden): ... invalid deletion request change by dev@example.com ...   (or an RBAC Forbidden if the user has no patch rights: also a pass)
+</code></pre>
+<p><strong>T4.4 – approval before any request exists.</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by a1@example.com ...
+</code></pre>
+<p><strong>T4.5 – a valid request (positive).</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: guardrail test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot;
+→ configmap/victim annotated
+$ state victim
+→ guardrails.example.com/delete-request=CHG1: guardrail test
+  guardrails.example.com/delete-requested-by=req@example.com
+</code></pre>
+<p>Teams: <code>CriticalDeletionApprovalRecorded</code> (info, batched up to 1 min).</p>
+<p><strong>T4.6 – requester approves own request.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=req@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... invalid change to guardrails.example.com/delete-approvals by req@example.com ...
+</code></pre>
+<p><strong>T4.7 – approver approves under another approver&#39;s name.</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a2@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... invalid change ... by a1@example.com ...
+</code></pre>
+<p><strong>T4.8 – approval with a malformed entry.</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a1@example.com&quot;
+→ Error from server (Forbidden): ... invalid change ...          (missing |timestamp)
+$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a1@example.com|yesterday&quot;
+→ Error from server (Forbidden): ... invalid change ...          (timestamp not RFC3339 UTC)
+</code></pre>
+<p><strong>T4.9 – approval that also changes data (smuggled change).</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS patch configmap victim --type merge -p &quot;{\&quot;metadata\&quot;:{\&quot;annotations\&quot;:{\&quot;$PFX/delete-approvals\&quot;:\&quot;a1@example.com|$(ts)\&quot;}},\&quot;data\&quot;:{\&quot;a\&quot;:\&quot;hacked\&quot;}}&quot;
+→ Error from server (Forbidden): ... invalid change to guardrails.example.com/delete-approvals by a1@example.com ... change nothing else in the object ...
+</code></pre>
+<p><strong>T4.10 – approver 1 approves correctly (positive).</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+→ configmap/victim annotated
+$ state victim | grep approvals
+→ guardrails.example.com/delete-approvals=a1@example.com|2026-09-18T10:20:31Z
+</code></pre>
+<p><strong>T4.11 – delete with only one approval.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS delete configmap victim
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim requires a delete-request and at least 2 distinct approvals from gitops-deletion-approvers (found 1, requested-by=req@example.com, executor may not be an approver) ...
+</code></pre>
+<p><strong>T4.12 – same approver twice (second entry, different timestamp).</strong></p>
+<pre><code class="language-bash">$ CUR=$(approvals victim)
+$ as-a1 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=$CUR,a1@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... invalid change ... not approve twice ...
+</code></pre>
+<p><strong>T4.13 – approver 2 replaces the list instead of appending (drops approver 1).</strong></p>
+<pre><code class="language-bash">$ as-a2 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=a2@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... invalid change ... append exactly one entry ...
+</code></pre>
+<p><strong>T4.14 – approver 2 approves correctly (positive).</strong></p>
+<pre><code class="language-bash">$ as-a2 -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=$CUR,a2@example.com|$(ts)&quot;
+→ configmap/victim annotated
+$ state victim | grep approvals
+→ guardrails.example.com/delete-approvals=a1@example.com|...Z,a2@example.com|...Z
+</code></pre>
+<p><strong>T4.15 – an approver executes.</strong></p>
+<pre><code class="language-bash">$ as-a1 -n $NS delete configmap victim
+→ Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: User &quot;a1@example.com&quot; cannot delete resource &quot;configmaps&quot; ...   (RBAC: approvers have no delete verb)
+# to exercise the POLICY rule itself, give a1 the executor role in the scratch namespace for this one step:
+$ as-admin -n $NS create rolebinding test-a1-exec --role=test-cm --user=a1@example.com
+$ as-a1 -n $NS delete configmap victim
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: ... (found 2, requested-by=req@example.com, executor may not be an approver) ...
+$ as-admin -n $NS delete rolebinding test-a1-exec
+
+**T4.16 – requester edits the reason after approvals.**
+```bash
+$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: changed my mind&quot;
+→ Error from server (Forbidden): ... invalid deletion request change by req@example.com ... approvals must be empty when the request changes ...
+</code></pre>
+<h2>5. The happy path ★</h2>
+<p><strong>T5.1 – executor deletes with two approvals.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS delete configmap victim
+→ configmap &quot;victim&quot; deleted
+</code></pre>
+<p>Audit tail:</p>
+<pre><code>→ delete victim by req@example.com rc=200 :: op=DELETE user=req@example.com groups=... requestedBy=req@example.com approvers=a1@example.com|a2@example.com approved=true exempt=false ::
+</code></pre>
+<p>Teams <strong>and</strong> email within ~60 s: 🔴 <code>[FIRING] CriticalResourceDeleted - configmaps guardrails-test/victim</code>, actor <code>req@example.com</code>, runbook link. Record the delta between the audit timestamp and the Teams post (target ≤ 60 s).</p>
+<p><strong>T5.2 – the same with the scripts (repeat with a fresh <code>victim</code>).</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS create configmap victim --from-literal=a=b &amp;&amp; as-admin -n $NS label configmap victim $PFX/critical=true
+$ KUBECONFIG=~/.kube/req.kubeconfig scripts/request-deletion.sh configmap victim -n $NS &quot;CHG2: script test&quot;
+→ Opening deletion request on configmap/victim as req@example.com
+  Request recorded. Ask 2 members of gitops-deletion-approvers (not yourself) to run:
+    ./approve-deletion.sh configmap victim -n guardrails-test
+  Resource     : configmap/victim -n guardrails-test
+  critical     : true
+  request      : CHG2: script test
+  requested-by : req@example.com
+  approvals    : &lt;none&gt;
+$ KUBECONFIG=~/.kube/a1.kubeconfig scripts/approve-deletion.sh configmap victim -n $NS      # type: approve
+→ Approval recorded at 2026-...Z
+$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/approve-deletion.sh configmap victim -n $NS      # type: approve
+→ Approval recorded at 2026-...Z
+$ KUBECONFIG=~/.kube/req.kubeconfig scripts/execute-deletion.sh configmap victim -n $NS     # type: victim
+→ Deleted. Expect CriticalResourceDeleted (email + Teams) within ~60s.
+  Audit trail (Loki / logcli): ...
+</code></pre>
+<p>Negative checks built into the scripts: <code>approve-deletion.sh</code> as <code>req</code> → <code>You opened this request (req@example.com); you cannot approve it.</code>; <code>execute-deletion.sh</code> with one approval → <code>Only 1 distinct approvals, 2 required. Deletion will be denied.</code></p>
+<h2>6. Cancel and expiry ★</h2>
+<p><strong>T6.1 – cancel clears everything; delete after cancel is denied.</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS create configmap victim2 --from-literal=a=b &amp;&amp; as-admin -n $NS label configmap victim2 $PFX/critical=true
+$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG3: cancel test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot;
+$ as-a1  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+$ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request-&quot; &quot;$PFX/delete-requested-by-&quot; &quot;$PFX/delete-approvals-&quot;
+→ configmap/victim2 annotated              (anyone with patch rights may cancel; cancelling never makes deletion easier)
+$ as-req -n $NS delete configmap victim2
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: ... (found 0, requested-by=, ...)
+</code></pre>
+<p><strong>T6.2 – the reaper removes expired AND future-dated approvals and cannot add any.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG4: reaper&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-approvals-&quot;
+$ as-a1  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|2000-01-01T00:00:00Z&quot;       # expired
+→ configmap/victim2 annotated
+$ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=$(approvals victim2),a2@example.com|2099-01-01T00:00:00Z&quot;   # future-dated
+→ configmap/victim2 annotated
+$ as-admin -n guardrails-system create job reaper-manual --from=cronjob/approval-reaper
+$ as-admin -n guardrails-system wait --for=condition=complete job/reaper-manual --timeout=120s
+$ as-admin -n guardrails-system logs job/reaper-manual
+→ reaper start ttl=4h (14400s) now=...
+  expire configmaps guardrails-test/victim2 approver=a1@example.com at=2000-01-01T00:00:00Z (ttl or future/invalid timestamp)
+  expire configmaps guardrails-test/victim2 approver=a2@example.com at=2099-01-01T00:00:00Z (ttl or future/invalid timestamp)
+  configmap/victim2 annotated
+  reaper done
+$ state victim2 | grep approvals
+→ (no output: both entries removed)
+$ as-admin --as=system:serviceaccount:guardrails-system:approval-reaper -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts),a2@example.com|$(ts)&quot;
+→ Error from server (Forbidden): ... invalid change ... by system:serviceaccount:guardrails-system:approval-reaper ...   (reaper cannot add)
+$ as-admin -n guardrails-system delete job reaper-manual
+</code></pre>
+<p>(The <code>--as</code> in the last step raises <code>ImpersonationUsed</code>; expected during testing.)</p>
+<h2>7. The GitOps path is pre-approved; the Argo CD UI is not ★</h2>
+<p><strong>T7.1 – a manifest removed from Git IS pruned (Git ruleset = approval) and alerted for PR correlation.</strong></p>
+<ol>
+<li>Open a PR that deletes <code>manifests/03-guardrails/vap-critical-delete-bindings.yaml</code>. CI step &quot;guardrail invariants&quot; → <strong>fails</strong> (a base binding must include Deny). Expected: the PR cannot merge. A PR that removes a <em>non-guardrail</em> critical object (say a labelled <code>PrometheusRule</code>) passes CI and needs two approvals including a security code owner.</li>
+<li>Cluster side, using a scratch labelled ConfigMap managed by a test Application in a test branch: remove it from the branch and let auto-sync prune it.</li>
+</ol>
+<pre><code class="language-bash">$ argocd app sync &lt;test-app&gt; --prune
+→ ... configmap/victim3  Pruned
+$ as-admin -n $NS get cm victim3
+→ Error from server (NotFound)
+</code></pre>
+<p>Teams: <code>GitOpsCriticalDeletionApplied</code> (warning) with actor <code>system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller</code>. No <code>CriticalResourceDeleted</code>. Audit decision annotation contains <code>gitops=true exempt=true</code>.</p>
+<p><strong>T7.2 – the guardrails Application itself has no cascade finalizer, prunes, and self-heals.</strong></p>
+<pre><code class="language-bash">$ as-admin -n openshift-gitops get application guardrails -o jsonpath=&#39;{.metadata.finalizers} {.spec.syncPolicy.automated} {.spec.syncPolicy.syncOptions}{&quot;\n&quot;}&#39;
+→  {&quot;allowEmpty&quot;:false,&quot;prune&quot;:true,&quot;selfHeal&quot;:true} [&quot;ServerSideApply=true&quot;,&quot;ApplyOutOfSyncOnly=true&quot;,&quot;RespectIgnoreDifferences=true&quot;,&quot;PruneLast=true&quot;]
+</code></pre>
+<p><strong>T7.3 – deleting through the Argo CD UI/CLI is out of band and denied.</strong></p>
+<pre><code class="language-bash">$ argocd login ... (as a member of platform-admins or an Argo CD admin)
+$ argocd app delete &lt;test-app-with-critical-object&gt; --cascade=false
+→ ... (Application is critical) rpc error: ... GUARDRAIL DENIED: deleting critical applications openshift-gitops/&lt;app&gt; requires a delete-request ...
+</code></pre>
+<p>As <code>gitops-operators</code> the UI&#39;s delete button is disabled / <code>permission denied</code> at Argo CD RBAC before the API is reached. Teams: <code>CriticalResourceDeleteDenied</code> with actor <code>openshift-gitops-argocd-server</code>.</p>
+<p><strong>T7.4 – impersonating the GitOps controller is the residual one-command bypass and must page (R1).</strong></p>
+<pre><code class="language-bash">$ as-admin --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller -n $NS delete configmap victim2 --dry-run=server
+→ configmap &quot;victim2&quot; deleted (server dry run)      (allowed: the controller is exempt)
+</code></pre>
+<p>Teams/email (security): 🔴 <code>PrivilegedIdentityImpersonated</code> naming <code>admin@example.com</code> → the controller identity, within ~1 min. <code>PrivilegedTokenMinted</code> fires likewise for <code>oc create token openshift-gitops-argocd-application-controller -n openshift-gitops</code>.</p>
+<h2>8. Self-healing of the control ★</h2>
+<p><strong>T8.1 – an out-of-band edit is denied in every phase; a break-glass edit is reverted and alerted.</strong> (pre-prod only)</p>
+<pre><code class="language-bash">$ as-admin patch validatingadmissionpolicybinding guardrails-critical-delete-named --type merge -p &#39;{&quot;spec&quot;:{&quot;validationActions&quot;:[&quot;Audit&quot;]}}&#39;
+→ Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...   (every phase)
+# with the break-glass token (T13 procedure):
+$ oc --token=&quot;$(cat /dev/shm/bg)&quot; patch validatingadmissionpolicybinding guardrails-critical-delete-named --type merge -p &#39;{&quot;spec&quot;:{&quot;validationActions&quot;:[&quot;Audit&quot;]}}&#39;
+→ validatingadmissionpolicybinding.admissionregistration.k8s.io/guardrails-critical-delete-named patched
+$ sleep 200; as-admin get vapb guardrails-critical-delete-named -o jsonpath=&#39;{.spec.validationActions}{&quot;\n&quot;}&#39;
+→ [&quot;Deny&quot;,&quot;Audit&quot;]       (Argo CD self-heal restored it; check `argocd app history guardrails`)
+</code></pre>
+<p>Teams/email: 🔴 <code>GuardrailPolicyModified</code> and <code>BreakGlassUsed</code> naming the actor within ~1 min.</p>
+<h2>9. Alert delivery ★</h2>
+<p><strong>T9.1 – synthetic alert (no cluster change).</strong></p>
+<pre><code class="language-bash">$ as-admin -n openshift-monitoring exec alertmanager-main-0 -c alertmanager -- amtool --alertmanager.url=http://localhost:9093 alert add \
+    alertname=CriticalResourceDeleted severity=critical guardrail=true team=platform-engineering \
+    objectRef_resource=configmaps objectRef_namespace=guardrails-test objectRef_name=synthetic user_username=tester@example.com \
+    --annotation=summary=&quot;SYNTHETIC test alert - ignore&quot; --annotation=description=&quot;delivery test&quot; --annotation=runbook_url=https://example
+</code></pre>
+<p>→ Teams card <code>🔴 [FIRING] CriticalResourceDeleted - configmaps guardrails-test/synthetic</code> and an email with subject <code>[FIRING:1] 🔴 CriticalResourceDeleted - configmaps guardrails-test/synthetic</code> within ~10 s. After <code>resolve_timeout</code> (5 min) both channels receive <code>[RESOLVED]</code>.</p>
+<pre><code class="language-bash">$ as-admin -n openshift-monitoring exec alertmanager-main-0 -c alertmanager -- amtool --alertmanager.url=http://localhost:9093 alert query alertname=CriticalResourceDeleted
+→ Alertname                 Starts At                Summary
+  CriticalResourceDeleted   2026-09-18 10:41:02 UTC  SYNTHETIC test alert - ignore
+</code></pre>
+<p><strong>T9.2 – real alert timing.</strong> Use T5.1. Record: audit <code>requestReceivedTimestamp</code>, alert <code>startsAt</code> (<code>amtool alert query</code>), Teams post time. Target ≤ 60 s.</p>
+<p><strong>T9.3 – repeat and inhibition.</strong> Leave the T5.1 alert unresolved: a second Teams post arrives after 30 min (<code>repeat_interval</code>). Fire T3.1 for the same object name while <code>CriticalResourceDeleted</code> is active: no separate <code>CriticalResourceDeleteDenied</code> post (inhibited).</p>
+<h2>10. Detection pipeline blind spot ★</h2>
+<p><strong>T10.1 – stopping audit forwarding is itself alerted from the metrics pipeline.</strong></p>
+<pre><code class="language-bash">$ as-admin -n openshift-logging patch clusterlogforwarder audit-forwarder --type merge -p &#39;{&quot;spec&quot;:{&quot;managementState&quot;:&quot;Unmanaged&quot;}}&#39;
+→ (phase ≥ 3: this is a critical object; the patch is flagged/denied by gitops-only-mutation depending on phase. If denied, use the workflow or break-glass in pre-prod only.)
+$ as-admin -n openshift-logging delete daemonset audit-forwarder
+$ sleep 1260        # 10 min of silence in the rate window + for: 10m = about 20 min
+</code></pre>
+<p>→ Teams/email: 🔴 <code>AuditLogIngestionStalled</code> (&quot;No audit log lines reached Loki for 10 minutes&quot;) plus <code>AuditForwarderChanged</code> from the earlier patch. Restore: <code>managementState: Managed</code>; the operator recreates the DaemonSet; the alert resolves within ~5 min.</p>
+<h2>11. Repository controls</h2>
+<p><strong>T11.1 – ruleset.</strong></p>
+<pre><code class="language-bash">$ gh api repos/example-org/openshift-administration/rules/branches/main --jq &#39;.[].type&#39;
+→ deletion
+  non_fast_forward
+  required_linear_history
+  required_signatures
+  pull_request
+  required_status_checks
+</code></pre>
+<p><strong>T11.2 – a PR that adds a human to <code>exemptUsers</code></strong> → CI <code>guardrail invariants</code> fails; CODEOWNERS requires <code>@example-org/security</code>; one approval is not enough to merge.</p>
+<h2>12. Impersonation is loud ★</h2>
+<pre><code class="language-bash">$ as-admin --as=a1@example.com --as-group=gitops-deletion-approvers -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+→ configmap/victim2 annotated     (cluster-admin CAN impersonate: this is residual risk R1)
+</code></pre>
+<p>→ Teams/email (security): 🔴 <code>ImpersonationUsed</code>: <code>admin@example.com impersonated a1@example.com for a write (patch configmaps)</code> within ~1 min. Audit tail shows <code>imp=a1@example.com</code>. This is the proof that a forged approval is always attributable.</p>
+<h2>13. Break-glass</h2>
+<p>Two custodians (<code>breakglass-custodians</code>), an incident ticket, pre-prod.</p>
+<pre><code class="language-bash">$ as-a1 -n guardrails-system create token breakglass --duration=10m
+→ error: failed to create token: serviceaccounts &quot;breakglass&quot; is forbidden: User &quot;a1@example.com&quot; cannot create resource &quot;serviceaccounts/token&quot; ...   (not a custodian)
+$ KUBECONFIG=~/.kube/custodian1.kubeconfig oc -n guardrails-system create token breakglass --duration=10m &gt; /dev/shm/bg
+→ Teams (security): 🔴 PrivilegedTokenMinted guardrails-system/breakglass by custodian1@example.com
+$ oc --token=&quot;$(cat /dev/shm/bg)&quot; --server=https://api.&lt;cluster&gt;:6443 -n $NS delete configmap victim2
+→ configmap &quot;victim2&quot; deleted     (no approvals needed: exempt identity)
+$ rm -f /dev/shm/bg
+</code></pre>
+<p>→ Teams/email (security): 🔴 <code>BreakGlassUsed</code> for every request made with the token; <code>CriticalResourceDeleted</code> with <code>exempt=true</code> in the decision annotation.</p>
+<h2>14. Privileged RBAC and group changes ★</h2>
+<pre><code class="language-bash">$ as-admin create clusterrolebinding test-ca --clusterrole=cluster-admin --user=someone@example.com
+→ Warning: Validation failed for ValidatingAdmissionPolicy &#39;guardrails-rbac-escalation-audit&#39; with binding &#39;guardrails-rbac-escalation-audit&#39;: FLAGGED FOR AUDIT (not blocked): privileged RBAC/group change by admin@example.com on clusterrolebindings test-ca. A security alert has been raised.
+  clusterrolebinding.rbac.authorization.k8s.io/test-ca created
+$ as-admin delete clusterrolebinding test-ca
+→ Warning: ... FLAGGED FOR AUDIT ...
+  clusterrolebinding.rbac.authorization.k8s.io &quot;test-ca&quot; deleted
+</code></pre>
+<p>→ Teams/email (security): 🔴 <code>PrivilegedRBACChange</code> for both operations.</p>
+<h2>15. Phase-2 behaviour (warn) — run once during phase 2</h2>
+<pre><code class="language-bash">$ as-admin -n $NS delete configmap victim --dry-run=server
+→ Warning: Validation failed for ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39; with binding &#39;guardrails-critical-delete-labelled&#39;: GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim requires ...
+  configmap &quot;victim&quot; deleted (server dry run)
+</code></pre>
+<p>Pass = the warning text is shown <strong>and</strong> the request succeeds.</p>
+<h2>16. Backup and restore</h2>
+<pre><code class="language-bash">$ as-admin -n openshift-adp create backup drill-$(date +%Y%m%d) --from-schedule=gitops-6h
+$ as-admin -n openshift-adp get backup drill-$(date +%Y%m%d) -o jsonpath=&#39;{.status.phase} items={.status.progress.itemsBackedUp}{&quot;\n&quot;}&#39;
+→ Completed items=137
+</code></pre>
+<p>Restore into a mapped namespace as in docs/07 → <code>Restore ... phase=Completed errors=0</code>; <code>oc get application,appproject,secret -n gitops-drill</code> lists the objects; delete <code>gitops-drill</code>.</p>
+<h2>17. Cleanup and results</h2>
+<pre><code class="language-bash"># The scratch namespace itself is not critical, so its deletion is accepted:
+$ as-admin delete ns $NS
+→ namespace &quot;guardrails-test&quot; deleted
+$ as-admin get ns $NS
+→ NAME              STATUS        AGE
+  guardrails-test   Terminating   30s
+</code></pre>
+<p>The namespace stays <code>Terminating</code> because the namespace controller&#39;s deletes of the labelled ConfigMaps are <strong>denied</strong> (the controller is not exempt). Audit tail: <code>delete victim2 by system:serviceaccount:kube-system:namespace-controller rc=403 :: ... approved=false ...</code>. This is intentional and worth showing reviewers: a namespace deletion cannot take a critical object with it. To finish the cleanup, run the full workflow (T5) on each remaining critical ConfigMap, or clear the label through the workflow; in pre-prod, break-glass (T13) is acceptable. The namespace then finishes terminating within a minute.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Scenario</th>
+<th>Expected</th>
+<th>Result</th>
+<th>Evidence (audit line / screenshot)</th>
+<th>Tester</th>
+<th>Date</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>T1.1</td>
+<td>phase-1 annotated, not blocked</td>
+<td>rc=200 + validation_failure</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T2.1</td>
+<td>non-critical delete</td>
+<td>allowed</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T2.2</td>
+<td>RBAC least privilege</td>
+<td>approvers cannot read secrets / delete; requesters cannot delete namespaces</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T3.1–T3.9</td>
+<td>single-identity deletes; hardened binding (3.7, 3.8)</td>
+<td>all denied</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T3.10</td>
+<td>label control (UPDATE and CREATE)</td>
+<td>requester/dev denied, approver allowed</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T4.1–T4.16</td>
+<td>forged/invalid approvals</td>
+<td>denied except 4.5, 4.10, 4.14</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T5.1–T5.2</td>
+<td>happy path</td>
+<td>deleted + red alert ≤ 60 s</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T6.1–T6.2</td>
+<td>cancel, reaper</td>
+<td>as described</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T7.1–T7.4</td>
+<td>GitOps path vs UI vs impersonation</td>
+<td>prune allowed + GitOpsCriticalDeletionApplied; UI denied; impersonation paged</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T8.1</td>
+<td>self-protection + self-heal</td>
+<td>denied for admin; break-glass edit reverted + alerts</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T9.1–T9.3</td>
+<td>delivery</td>
+<td>Teams + email, repeat, inhibit</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T10.1</td>
+<td>ingestion stalled</td>
+<td>metrics alert</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T11</td>
+<td>repo controls</td>
+<td>ruleset + CI</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T12</td>
+<td>impersonation</td>
+<td>alert</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T13</td>
+<td>break-glass</td>
+<td>non-custodian cannot mint; custodian mint paged; use paged</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T14</td>
+<td>privileged RBAC</td>
+<td>warning + alert</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T15</td>
+<td>phase-2 warning</td>
+<td>warning + success</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>T16</td>
+<td>backup/restore</td>
+<td>Completed</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody></table>
+<p>Sign-off requires every row filled, zero unexpected results, and the evidence attached to the change ticket for the next phase.</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/14-manual-test-guide.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

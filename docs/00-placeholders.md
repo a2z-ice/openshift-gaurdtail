@@ -21,7 +21,7 @@ Everything organisation-specific is a literal placeholder so a single search/rep
 
 ```bash
 # must print nothing when you are done (secrets excluded on purpose: they stay REPLACE_* until injected from the vault)
-grep -RnE 'example\.com|example-org|REPLACE' manifests docs scripts .github llm .claude AGENTS.md \
+grep -RnE 'example\.com|example-org|REPLACE' manifests docs scripts .github llm .claude .cursor html AGENTS.md CLAUDE.md README.md llms.txt \
   | grep -vE 'REPLACE_FROM_VAULT|REPLACE_ME|REPLACE\.logic|sig=REPLACE|workflows/REPLACE'
 ```
 

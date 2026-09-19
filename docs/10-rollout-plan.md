@@ -17,15 +17,15 @@ Rollback: not applicable (nothing enforced).
 
 ## Phase 1 – audit only (≥ 1 week)
 
-`manifests/overlays/phase1-audit`: all bindings `validationActions: [Audit]` (rbac-escalation `[Warn, Audit]`).
+`manifests/overlays/phase1-audit`: deletion, label-control and gitops-only bindings `validationActions: [Audit]`; rbac-escalation `[Warn, Audit]`; the `guardrails-gitops-only-mutation-hardened` binding is `[Deny, Audit]` **from phase 1**: out-of-band edits to the guardrail's own objects are denied immediately (humans can still add approval annotations).
 
 Apply: merge the PR that sets the app path (or `oc apply --server-side -k manifests/overlays/phase1-audit` once, then let Argo CD own it).
 
-Watch: `CriticalResourceDeleteDenied` (would-have-been-denied), `ArgoCDDirectMutation`, `GuardrailPolicyModified`, `PrivilegedRBACChange`. Every hit is either a workflow the teams must adopt or an identity that needs to be in `gitopsServiceAccounts`/`reaperUsers` (never a human in `exemptUsers`).
+Watch: `CriticalDeleteWouldBeDenied` (the phase-1/2 rollout signal), `ArgoCDDirectMutation`, `GuardrailPolicyModified`, `PrivilegedRBACChange`, `GitOpsCriticalDeletionApplied` (must always match a PR). Every hit is either a workflow the teams must adopt or an identity that needs to be in `gitopsServiceAccounts`/`reaperUsers` (never a human in `exemptUsers`).
 
 Exit criteria:
 - VAP status: `Ready=True`, no compile errors (type-check *warnings* are fine).
-- `scripts/test-guardrails.sh` on pre-prod: every "deny" case shows the `validation_failure` annotation in the audit log (nothing is blocked yet, so the script itself reports FAIL on deny cases; the annotation is what you check).
+- `scripts/test-guardrails.sh` on pre-prod: the script is phase-aware (expects allow in phase 1) and must PASS; the `validation_failure` annotations and `CriticalDeleteWouldBeDenied` alerts are the evidence.
 - R3 (docs/01) answered: does the policy evaluate deletes of its own bindings? (`oc delete vapb guardrails-critical-delete-named --dry-run=server` produces the audit annotation.)
 - Zero unexplained would-have-been-denied events for 7 consecutive days.
 - All approvers have run `approve-deletion.sh` once on a scratch object.
@@ -46,7 +46,7 @@ Rollback: PR back to phase 1.
 
 Go/no-go checklist (in the change ticket):
 - [ ] Phase 2 exit criteria met and signed by platform + security leads.
-- [ ] `scripts/test-guardrails.sh` PASS on pre-prod (all 32 cases).
+- [ ] `scripts/test-guardrails.sh` PASS on pre-prod (all cases, phase-3 expectations).
 - [ ] Break-glass rehearsal done (docs/09) within the last 30 days.
 - [ ] Restore drill done (docs/07) within the last 90 days.
 - [ ] On-call roster knows the runbooks.
@@ -58,7 +58,7 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server     # den
 scripts/verify-install.sh
 ```
 
-Rollback: PR back to phase 2 (the PR itself needs 2 approvals; the binding change is applied by Argo CD, which is allowed to mutate). Emergency: break-glass edits the bindings' `validationActions`.
+Rollback: PR back to phase 2 (the PR itself needs 2 approvals; the binding change is applied by Argo CD, the GitOps path). Emergency: break-glass edits the bindings' `validationActions` (the hardened binding denies everyone else).
 
 ## Phase 4 – GitOps-only mutation (optional but recommended, ≥ 2 weeks after phase 3)
 

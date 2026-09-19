@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12-operations-and-compliance · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>12 · Operations and compliance</h1>
+<h2>Recurring activities</h2>
+<table>
+<thead>
+<tr>
+<th>Cadence</th>
+<th>Activity</th>
+<th>Owner</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Continuous</td>
+<td>On-call acknowledges guardrail alerts within 5 min; every <code>CriticalResourceDeleted</code> maps to a change ticket</td>
+<td>Platform on-call</td>
+<td>Teams thread + ticket</td>
+</tr>
+<tr>
+<td>Weekly</td>
+<td>Review <code>CriticalResourceDeleteDenied</code>, <code>ArgoCDDirectMutation</code>, <code>ImpersonationUsed</code> counts; tune false positives via PR (never via <code>exemptUsers</code> for humans)</td>
+<td>Platform</td>
+<td>dashboard export</td>
+</tr>
+<tr>
+<td>Monthly</td>
+<td>Synthetic alert (<code>amtool alert add</code>) → Teams + email delivery confirmed; SMTP/Teams webhook rotation check</td>
+<td>Platform</td>
+<td>screenshot</td>
+</tr>
+<tr>
+<td>Monthly</td>
+<td><code>scripts/verify-install.sh</code> on every cluster</td>
+<td>Platform</td>
+<td>output in ticket</td>
+</tr>
+<tr>
+<td>Quarterly</td>
+<td>Access recertification: members of <code>platform-admins</code>, <code>gitops-deletion-approvers</code>, <code>gitops-deletion-requesters</code>, GitHub code-owner teams, vault break-glass custodians</td>
+<td>Security + team leads</td>
+<td>signed list</td>
+</tr>
+<tr>
+<td>Quarterly</td>
+<td>Restore drill (docs/07)</td>
+<td>Platform</td>
+<td>drill record</td>
+</tr>
+<tr>
+<td>Quarterly</td>
+<td>Break-glass rehearsal on pre-prod (docs/09)</td>
+<td>Security</td>
+<td>incident record</td>
+</tr>
+<tr>
+<td>Per upgrade (OCP, Logging, GitOps, Loki)</td>
+<td><code>scripts/test-guardrails.sh</code> on pre-prod, then prod smoke test</td>
+<td>Platform</td>
+<td>evidence log</td>
+</tr>
+<tr>
+<td>Annually</td>
+<td>Threat model and residual-risk register review (docs/01); full Argo CD cold-start rehearsal</td>
+<td>Security + Platform</td>
+<td>updated docs</td>
+</tr>
+</tbody></table>
+<h2>Dashboards (suggested panels, Grafana / console)</h2>
+<ul>
+<li>Guardrail events over time by alertname (Loki <code>count_over_time</code> of <code>annotations_guardrails_critical_delete_decision</code>).</li>
+<li>Denied deletions by user (top 10) and by resource kind.</li>
+<li>Approvals recorded vs deletions executed (should be ≥ 2:1).</li>
+<li>Time from audit event to alert <code>startsAt</code> (p95 ≤ 60 s).</li>
+<li>Audit ingestion rate per API server and per tenant; forwarder buffer size.</li>
+<li>Argo CD sync status of the <code>guardrails</code> app.</li>
+</ul>
+<h2>KPIs</h2>
+<table>
+<thead>
+<tr>
+<th>KPI</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Unapproved critical deletions</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Detection latency (audit → alert) p95</td>
+<td>≤ 60 s</td>
+</tr>
+<tr>
+<td>Alert acknowledgement</td>
+<td>≤ 5 min</td>
+</tr>
+<tr>
+<td>Approvers available (members / required)</td>
+<td>≥ 2×</td>
+</tr>
+<tr>
+<td>Break-glass uses per quarter</td>
+<td>0 (each one has a post-mortem)</td>
+</tr>
+<tr>
+<td>Restore drill success</td>
+<td>100 %</td>
+</tr>
+</tbody></table>
+<h2>Control mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Framework</th>
+<th>Control</th>
+<th>Implemented by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ISO/IEC 27001:2022</td>
+<td>A.5.15 Access control, A.5.18 Access rights, A.8.2 Privileged access rights</td>
+<td>docs/03, RBAC, JIT <code>platform-admins</code>, break-glass</td>
+</tr>
+<tr>
+<td></td>
+<td>A.8.15 Logging, A.8.16 Monitoring activities</td>
+<td>docs/02, docs/06</td>
+</tr>
+<tr>
+<td></td>
+<td>A.8.13 Information backup</td>
+<td>docs/07</td>
+</tr>
+<tr>
+<td></td>
+<td>A.8.32 Change management</td>
+<td>docs/08, docs/10</td>
+</tr>
+<tr>
+<td></td>
+<td>A.5.3 Segregation of duties</td>
+<td>two-person rule (requester / approvers / executor)</td>
+</tr>
+<tr>
+<td>SOC 2 (TSC)</td>
+<td>CC6.1–CC6.3 logical access; CC7.2–CC7.3 monitoring &amp; incident response; CC8.1 change management; A1.2 backup</td>
+<td>as above</td>
+</tr>
+<tr>
+<td>NIST SP 800-53 r5</td>
+<td>AC-3(2) dual authorization, AC-5 separation of duties, AC-6(9) log privileged use, AU-2/AU-3/AU-6/AU-9 audit generation, content, review, protection (WORM), AU-11 retention, CM-3 change control, CM-5 access restrictions for change, CP-9/CP-10 backup &amp; recovery, IR-4/IR-6 incident handling &amp; reporting, SI-4 monitoring</td>
+<td>mapped per row above</td>
+</tr>
+<tr>
+<td>CIS OpenShift Benchmark</td>
+<td>1.2.x API server audit; 3.2 audit log policy; 5.x RBAC</td>
+<td>docs/02, docs/03</td>
+</tr>
+<tr>
+<td>PCI DSS 4.0</td>
+<td>7.2 least privilege; 8.x identity; 10.2–10.5 audit trails and protection; 10.7 detection of failures of critical security control systems</td>
+<td>docs/03, docs/02, metrics alerts on pipeline health</td>
+</tr>
+</tbody></table>
+<h2>Change management for this repository</h2>
+<p>Every change is a PR with two approvals (docs/08). Changes to <code>GuardrailConfig</code>, the policies, <code>exemptUsers</code>, groups or alert routing additionally require a security reviewer (CODEOWNERS). Emergency changes follow the break-glass runbook and get a post-mortem.</p>
+<h2>Documentation upkeep</h2>
+<p>Each document has a &quot;Verification&quot; section; when a verification command changes because of an upgrade, the PR that upgrades the operator updates the document. <code>docs/01</code> residual-risk register is reviewed at every quarterly recertification.</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/12-operations-and-compliance.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

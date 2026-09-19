@@ -66,6 +66,7 @@ spec:
     - name: isTrusted
       expression: >-
         request.userInfo.username in params.spec.exemptUsers
+        || request.userInfo.username in params.spec.gitopsControllers
         || request.userInfo.username in params.spec.gitopsServiceAccounts
         || (has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups))
   validations:

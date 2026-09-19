@@ -2,7 +2,9 @@
 # REFERENCE SNIPPET (not applied by kustomize): the settings every ApplicationSet that
 # generates production Applications must carry. Copy into your ApplicationSets.
 #   preserveResourcesOnDeletion: true  => generated Applications get NO cascade finalizer;
-#                                         deleting the ApplicationSet leaves workloads running
+#                                         deleting the ApplicationSet out of band leaves workloads running
+#   prune: true is fine for Git-managed apps (the Git ruleset is the approval); keep prune: false only for
+#   applications whose repository does not enforce two reviewers
 #   policy: sync + allowPolicyOverride false  => no per-app override that re-enables prune
 # Argo CD only honours preserveResourcesOnDeletion at Application CREATION; for existing
 # Applications remove the finalizer once:
@@ -43,8 +45,7 @@ spec:
         namespace: "{{ .path.basename }}"
       syncPolicy:
         automated:
-          prune: false
+          prune: true          # Git is the source of truth; set false only if the app repo lacks the 2-reviewer ruleset
           selfHeal: true
         syncOptions:
-          - Prune=false
           - ServerSideApply=true

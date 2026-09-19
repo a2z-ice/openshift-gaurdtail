@@ -1,11 +1,23 @@
 # ---------------------------------------------------------------------------
-# RBAC for the guardrail workflow.
-# RBAC decides WHO may touch a critical object at all; the admission policy decides
-# WHAT they may change (only their own approval/request annotations). RBAC alone cannot
-# restrict a patch to annotations, which is why both layers exist.
-# All objects are named guardrails-* and are therefore protected by name in the policy.
+# RBAC for the guardrail workflow - LEAST PRIVILEGE.
+#
+# Two tiers of critical objects:
+#   Tier A (workflow)      : approvers can annotate, executors can delete, after the two-person rule.
+#                            Cluster-scoped kinds are limited with resourceNames; namespaced kinds are
+#                            granted only inside the platform namespaces via RoleBindings (rolebindings.yaml).
+#   Tier B (break-glass)   : Namespaces, CRDs, OLM objects (Subscription/CSV/OperatorGroup/ClusterExtension),
+#                            Secrets, ServiceAccounts. A patch on these is a privilege-escalation primitive
+#                            (secret contents, conversion webhooks, operator pod specs, PSA labels) so NO human
+#                            role may patch or read them. Their deletion is a dual-custody break-glass operation
+#                            (docs/09), which is rarer and stricter than the workflow - by design.
+#
+# Even on Tier A, a spec change smuggled into an approval is blocked by the admission policy
+# (guardrails-gitops-only-mutation, hardened binding, Deny in every phase for the self-protection set; V3/V4
+# of guardrails-critical-delete for approval writes). RBAC cannot restrict a patch to annotations, so the two
+# layers are both required.
+# Adding a critical namespace = add it to rolebindings.yaml. Adding a cluster-scoped critical object = add its
+# name to the resourceNames lists below.
 # ---------------------------------------------------------------------------
-# Approvers/requesters: may READ and PATCH the protected kinds (policy limits the patch to annotations). NO delete.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,55 +28,50 @@ metadata:
 rules:
   - apiGroups: ["guardrails.example.com"]
     resources: ["guardrailconfigs"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: [""]
-    resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["argoproj.io"]
-    resources: ["argocds", "applications", "applicationsets", "appprojects"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["operators.coreos.com"]
-    resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["olm.operatorframework.io"]
-    resources: ["clusterextensions"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "watch", "patch"]
+    resourceNames: ["default"]
+    verbs: ["get", "patch"]
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
-    verbs: ["get", "list", "watch", "patch"]
+    resourceNames:
+      - guardrails-critical-delete
+      - guardrails-critical-delete-labelled
+      - guardrails-critical-delete-named
+      - guardrails-critical-label-control
+      - guardrails-gitops-only-mutation
+      - guardrails-gitops-only-mutation-hardened
+      - guardrails-rbac-escalation-audit
+    verbs: ["get", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
-    verbs: ["get", "list", "watch", "patch"]
+    resourceNames:
+      - guardrails-approver
+      - guardrails-approver-namespaced
+      - guardrails-executor
+      - guardrails-executor-namespaced
+      - guardrails-approvers
+      - guardrails-executors
+      - guardrails-platform-admins
+      - guardrails-breakglass
+      - guardrails-approval-reaper
+      - guardrails-auditors-view
+      - guardrails-auditors-audit-logs
+      - guardrails-audit-collector-collect-audit-logs
+      - guardrails-audit-collector-logs-writer
+      - guardrails-etcd-backup-privileged
+    verbs: ["get", "patch"]
   - apiGroups: ["user.openshift.io"]
     resources: ["groups"]
-    verbs: ["get", "list", "watch", "patch"]
+    resourceNames: ["platform-admins", "gitops-deletion-approvers", "gitops-deletion-requesters", "gitops-operators", "auditors", "breakglass-custodians"]
+    verbs: ["get", "patch"]
   - apiGroups: ["config.openshift.io"]
     resources: ["apiservers", "oauths"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["loki.grafana.com"]
-    resources: ["lokistacks", "alertingrules", "rulerconfigs"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["observability.openshift.io"]
-    resources: ["clusterlogforwarders"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["monitoring.coreos.com"]
-    resources: ["prometheusrules", "alertmanagerconfigs"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["velero.io"]
-    resources: ["schedules", "backupstoragelocations"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["oadp.openshift.io"]
-    resources: ["dataprotectionapplications"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["batch"]
-    resources: ["cronjobs"]
-    verbs: ["get", "list", "watch", "patch"]
+    resourceNames: ["cluster"]
+    verbs: ["get", "patch"]
+  # discovery for the scripts (metadata only; no secrets, no namespaces content)
+  - apiGroups: ["guardrails.example.com", "admissionregistration.k8s.io", "user.openshift.io"]
+    resources: ["guardrailconfigs", "validatingadmissionpolicies", "validatingadmissionpolicybindings", "groups"]
+    verbs: ["list", "watch"]
 ---
-# Executors: the people allowed to run the final `oc delete` once approvals are in place.
-# Deliberately a SEPARATE role so that "can approve" and "can execute" are different grants.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -73,37 +80,111 @@ metadata:
     guardrails.example.com/critical: "true"
     app.kubernetes.io/part-of: guardrails
 rules:
+  - apiGroups: ["guardrails.example.com"]
+    resources: ["guardrailconfigs"]
+    resourceNames: ["default"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    resourceNames:
+      - guardrails-critical-delete
+      - guardrails-critical-delete-labelled
+      - guardrails-critical-delete-named
+      - guardrails-critical-label-control
+      - guardrails-gitops-only-mutation
+      - guardrails-gitops-only-mutation-hardened
+      - guardrails-rbac-escalation-audit
+    verbs: ["get", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    resourceNames:
+      - guardrails-approver
+      - guardrails-approver-namespaced
+      - guardrails-executor
+      - guardrails-executor-namespaced
+      - guardrails-approvers
+      - guardrails-executors
+      - guardrails-platform-admins
+      - guardrails-breakglass
+      - guardrails-approval-reaper
+      - guardrails-auditors-view
+      - guardrails-auditors-audit-logs
+      - guardrails-audit-collector-collect-audit-logs
+      - guardrails-audit-collector-logs-writer
+      - guardrails-etcd-backup-privileged
+    verbs: ["get", "delete"]
+  - apiGroups: ["user.openshift.io"]
+    resources: ["groups"]
+    resourceNames: ["gitops-deletion-approvers", "gitops-deletion-requesters", "gitops-operators", "auditors", "breakglass-custodians"]
+    verbs: ["get", "delete"]
+---
+# Namespaced halves: bound with RoleBindings in the platform namespaces only (never a ClusterRoleBinding).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-approver-namespaced
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["argocds", "applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["approval-reaper", "ldap-sync-config"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: ["approval-reaper", "etcd-backup", "ldap-group-sync"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["loki.grafana.com"]
+    resources: ["lokistacks", "alertingrules", "rulerconfigs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["observability.openshift.io"]
+    resources: ["clusterlogforwarders"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules", "alertmanagerconfigs"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["velero.io"]
+    resources: ["schedules", "backupstoragelocations"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["oadp.openshift.io"]
+    resources: ["dataprotectionapplications"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: guardrails-executor-namespaced
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+rules:
   - apiGroups: ["argoproj.io"]
     resources: ["argocds", "applications", "applicationsets", "appprojects"]
     verbs: ["get", "list", "delete"]
   - apiGroups: [""]
-    resources: ["namespaces", "secrets", "configmaps"]
+    resources: ["configmaps"]
+    resourceNames: ["approval-reaper", "ldap-sync-config"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: ["approval-reaper", "etcd-backup", "ldap-group-sync"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "delete"]
-  - apiGroups: ["operators.coreos.com"]
-    resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+  - apiGroups: ["loki.grafana.com", "observability.openshift.io", "monitoring.coreos.com", "velero.io", "oadp.openshift.io", "networking.k8s.io"]
+    resources: ["lokistacks", "alertingrules", "rulerconfigs", "clusterlogforwarders", "prometheusrules", "alertmanagerconfigs", "schedules", "backupstoragelocations", "dataprotectionapplications", "networkpolicies"]
     verbs: ["get", "list", "delete"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "delete"]
-  - apiGroups: ["loki.grafana.com", "observability.openshift.io", "monitoring.coreos.com", "velero.io", "oadp.openshift.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "delete"]
----
-# Auditors: read everything, change nothing.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: guardrails-auditors-view
-  labels:
-    app.kubernetes.io/part-of: guardrails
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-reader
-subjects:
-  - kind: Group
-    apiGroup: rbac.authorization.k8s.io
-    name: auditors
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -117,12 +198,8 @@ roleRef:
   kind: ClusterRole
   name: guardrails-approver
 subjects:
-  - kind: Group
-    apiGroup: rbac.authorization.k8s.io
-    name: gitops-deletion-approvers
-  - kind: Group
-    apiGroup: rbac.authorization.k8s.io
-    name: gitops-deletion-requesters
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -136,9 +213,35 @@ roleRef:
   kind: ClusterRole
   name: guardrails-executor
 subjects:
-  - kind: Group
-    apiGroup: rbac.authorization.k8s.io
-    name: gitops-deletion-requesters
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-requesters }
+---
+# Auditors: read everything, change nothing, and read the Loki audit tenant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-auditors-view
+  labels:
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-reader
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: auditors }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: guardrails-auditors-audit-logs
+  labels:
+    app.kubernetes.io/part-of: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-audit-view        # created by the Logging operator; grants get on loki.grafana.com audit/logs
+subjects:
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: auditors }
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: gitops-deletion-approvers }
 ---
 # Time-boxed cluster-admin. The group is EMPTY at rest; the IdP (Entra PIM / Okta / LDAP JIT) adds a
 # person for a bounded window. This is the ONLY cluster-admin binding for humans.
@@ -154,6 +257,4 @@ roleRef:
   kind: ClusterRole
   name: cluster-admin
 subjects:
-  - kind: Group
-    apiGroup: rbac.authorization.k8s.io
-    name: platform-admins
+  - { kind: Group, apiGroup: rbac.authorization.k8s.io, name: platform-admins }

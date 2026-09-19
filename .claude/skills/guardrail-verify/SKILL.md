@@ -17,12 +17,12 @@ grep -q '"Deny"' manifests/03-guardrails/vap-critical-delete-bindings.yaml
 ! grep -v '^\s*#' manifests/04-argocd/application-guardrails.yaml | grep -Eq 'prune: *true'
 ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@'
 ```
-All must pass before a PR. Expected object count per overlay: 60.
+All must pass before a PR. Expected object count per overlay: 84.
 
 ## Cluster (needs oc login with a personal identity)
 1. `scripts/verify-install.sh` — hard checks on policies (Ready), bindings' actions, kubeadmin removed, audit profile, forwarder Ready, Loki, alert rules, Alertmanager Teams route, Argo CD hardening, backups.
 2. Smoke: `oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server` → must be denied in phase ≥ 3 (phase 1/2: allowed, but the audit event carries `validation_failure`).
 3. Policy status: `oc get vap guardrails-critical-delete -o jsonpath='{.status.conditions}'` — `Ready=True`; type-check *warnings* about undefined fields are expected, errors are not.
-4. Full matrix (scratch namespace only): `scripts/test-guardrails.sh` → 32 cases; keep `evidence-*.log`. Impersonation mode raises `ImpersonationUsed` on purpose; use `IMPERSONATE=false` with four kubeconfigs for sign-off.
+4. Full matrix (scratch namespace only): `scripts/test-guardrails.sh` → phase-aware (~60 cases); keep `evidence/<ts>.log`. Impersonation mode raises `ImpersonationUsed` on purpose; use `IMPERSONATE=false` with four kubeconfigs for sign-off.
 5. Alert delivery: `amtool alert add …` synthetic (command in `docs/06` §Teams) → Teams card + email ≤ 10 s.
 6. Log the run in `llm/memory.md` §State log.

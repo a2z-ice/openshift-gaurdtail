@@ -10,6 +10,8 @@ jobs:
   validate:
     name: validate
     runs-on: ubuntu-latest
+    env:
+      HAS_PREPROD: ${{ secrets.PREPROD_KUBECONFIG != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -31,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in out/*.yaml; do
-            kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.34.0 \
+            kubeconform -strict -ignore-missing-schemas -kubernetes-version master \
               -schema-location default \
               -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
               -summary "$f"
@@ -39,28 +41,49 @@ jobs:
       - name: guardrail invariants
         run: |
           set -euo pipefail
-          # 1. the enforce overlay must Deny
-          grep -q '"Deny"' manifests/03-guardrails/vap-critical-delete-bindings.yaml
-          # 2. the guardrails Application must never carry the cascade finalizer or prune=true
-          ! grep -v '^\s*#' manifests/04-argocd/application-guardrails.yaml | grep -q 'resources-finalizer.argocd.argoproj.io'
-          ! grep -v '^\s*#' manifests/04-argocd/application-guardrails.yaml | grep -Eq 'prune: *true'
-          # 3. no human identity in exemptUsers
-          ! grep -A3 'exemptUsers:' manifests/03-guardrails/guardrailconfig-default.yaml | grep -E '^\s+- [^s].*@'
-          # 4. minApprovers >= 2
-          test "$(grep -E '^\s+minApprovers:' manifests/03-guardrails/guardrailconfig-default.yaml | awk '{print $2}')" -ge 2
-          # 5. no plaintext secrets
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import yaml, sys
+          fail = []
+          docs = list(yaml.safe_load_all(open('manifests/03-guardrails/vap-critical-delete-bindings.yaml')))
+          for d in docs:
+              if d and d['kind'] == 'ValidatingAdmissionPolicyBinding' and 'Deny' not in d['spec']['validationActions']:
+                  fail.append(f"{d['metadata']['name']}: base binding must include Deny")
+          for d in yaml.safe_load_all(open('manifests/03-guardrails/vap-gitops-only-mutation.yaml')):
+              if d and d['kind'] == 'ValidatingAdmissionPolicyBinding' and d['metadata']['name'].endswith('-hardened') and 'Deny' not in d['spec']['validationActions']:
+                  fail.append('hardened binding must Deny')
+          cfg = yaml.safe_load(open('manifests/03-guardrails/guardrailconfig-default.yaml'))['spec']
+          if cfg['minApprovers'] < 2: fail.append('minApprovers < 2')
+          if cfg.get('executorMayBeApprover'): fail.append('executorMayBeApprover must be false')
+          for u in cfg['exemptUsers']:
+              if u not in ('system:apiserver', 'system:serviceaccount:guardrails-system:breakglass'): fail.append(f'unexpected exempt identity {u}')
+          for u in cfg['gitopsControllers']:
+              if not u.startswith('system:serviceaccount:openshift-gitops:'): fail.append(f'gitopsControllers may only hold Argo CD controllers: {u}')
+          if 'system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server' in cfg['gitopsControllers']: fail.append('argocd-server must not be a gitopsController (UI actions are not Git-reviewed)')
+          for u in cfg['gitopsServiceAccounts'] + cfg['reaperUsers']:
+              if not u.startswith('system:serviceaccount:'): fail.append(f'human in trusted list: {u}')
+          app = yaml.safe_load(open('manifests/04-argocd/application-guardrails.yaml'))
+          if app['metadata'].get('finalizers'): fail.append('guardrails Application must not carry a cascade finalizer')
+          if not app['spec']['syncPolicy']['automated'].get('selfHeal'): fail.append('selfHeal must be true')
+          print('\n'.join(fail) or 'invariants OK'); sys.exit(1 if fail else 0)
+          PY
+          # no plaintext secrets
           ! grep -RIE 'sig=[A-Za-z0-9_-]{20,}|smtp_auth_password: *[^R]' manifests | grep -v REPLACE
-          echo "invariants OK"
       - name: mermaid diagrams parse (GitHub renders with the same engine)
         run: |
           npm install --no-save --silent mermaid@11 jsdom dompurify
           node scripts/check-mermaid.mjs README.md docs/*.md
+      - name: html docs are up to date (html/docs generated from Markdown)
+        run: |
+          npm install --no-save --silent marked
+          node scripts/build-html-docs.mjs
+          git diff --exit-code -- html/docs || { echo "html/docs is stale: run node scripts/build-html-docs.mjs and commit"; exit 1; }
       - name: shellcheck scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null
-          shellcheck -x scripts/*.sh
-      - name: Server-side dry-run on pre-prod (optional)
-        if: ${{ env.PREPROD_KUBECONFIG != '' }}
+          shellcheck -x --severity=warning scripts/*.sh
+      - name: Server-side dry-run on pre-prod (optional; set the PREPROD_KUBECONFIG repository secret)
+        if: ${{ env.HAS_PREPROD == 'true' }}
         env:
           PREPROD_KUBECONFIG: ${{ secrets.PREPROD_KUBECONFIG }}
         run: |

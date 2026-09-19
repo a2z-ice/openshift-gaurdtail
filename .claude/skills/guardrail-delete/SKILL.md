@@ -5,6 +5,8 @@ description: Request, approve, execute or cancel the deletion of a critical Open
 
 # Critical-resource deletion (two-person rule)
 
+**First question: is the object managed from Git?** If yes, delete it by PR (2 reviewers); Argo CD applies it and `GitOpsCriticalDeletionApplied` confirms. The cluster-side workflow below is for **out-of-band** deletions (objects not in Git, or emergencies). **Tier-B kinds** (namespaces, CRDs, OLM objects, Secrets, ServiceAccounts) cannot be deleted by the workflow roles at all: Git or break-glass only.
+
 Three different humans are required: requester, two approvers (in `gitops-deletion-approvers`, not the requester), executor (not an approver). The admission policy enforces this; the scripts only make it convenient.
 
 ## Procedure

@@ -28,6 +28,12 @@ spec:
       namespace: openshift-monitoring
     - server: https://kubernetes.default.svc
       namespace: openshift-adp
+    - server: https://kubernetes.default.svc
+      namespace: openshift-operators-redhat
+    - server: https://kubernetes.default.svc
+      namespace: openshift-etcd-backup
+    - server: https://kubernetes.default.svc
+      namespace: openshift-kube-apiserver
   clusterResourceWhitelist:
     - group: ""
       kind: Namespace
@@ -47,6 +53,8 @@ spec:
       kind: Group
     - group: config.openshift.io
       kind: APIServer
+    - group: config.openshift.io
+      kind: OAuth
   namespaceResourceBlacklist:
     - group: ""
       kind: ResourceQuota

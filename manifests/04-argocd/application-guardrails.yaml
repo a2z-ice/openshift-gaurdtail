@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------------------
-# App-of-apps that keeps the guardrails in place (self-heal) WITHOUT ever pruning them.
-#   - no Argo CD cascade finalizer => deleting this Application does not delete the policies
-#   - prune: false            => removing a file from Git does not delete a live policy
-#                                (a deletion still needs the annotation workflow; Argo CD's SA is not exempt)
+# App-of-apps that keeps the guardrails in place (self-heal). Git is the source of truth:
+#   - prune: true             => removing a manifest from Git (merged through the 2-reviewer ruleset) removes the
+#                                live object; the Argo CD controller is a gitopsController (pre-approved path)
+#   - no Argo CD cascade finalizer => deleting this Application OUT OF BAND (UI/oc) does not delete the policies;
+#                                the Application itself is critical, so that delete needs the workflow anyway
 #   - selfHeal: true          => any out-of-band change is reverted within the reconcile interval
 #   - ServerSideApply         => Argo CD owns only the fields it sets; approval annotations added by humans survive
 # Point spec.source.path at the overlay for the current rollout phase.
@@ -28,11 +29,10 @@ spec:
     server: https://kubernetes.default.svc
   syncPolicy:
     automated:
-      prune: false
+      prune: true
       selfHeal: true
       allowEmpty: false
     syncOptions:
-      - Prune=false
       - ServerSideApply=true
       - ApplyOutOfSyncOnly=true
       - RespectIgnoreDifferences=true

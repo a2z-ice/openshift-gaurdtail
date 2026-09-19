@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
   - namespace-guardrails-system.yaml
   - groups.yaml
+  - networkpolicy-guardrails-system.yaml

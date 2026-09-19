@@ -61,6 +61,19 @@ users: []
 apiVersion: user.openshift.io/v1
 kind: Group
 metadata:
+  name: breakglass-custodians
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+  annotations:
+    guardrails.example.com/description: "May mint the break-glass token (two custodians per use, incident required). Two people from different teams."
+users:
+  - custodian1@example.com
+  - custodian2@example.com
+---
+apiVersion: user.openshift.io/v1
+kind: Group
+metadata:
   name: auditors
   labels:
     app.kubernetes.io/part-of: guardrails
