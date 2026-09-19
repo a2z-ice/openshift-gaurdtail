@@ -26,6 +26,7 @@
 - [docs/16-production-readiness-review.md](docs/16-production-readiness-review.md): independent audit findings, fixes, trust-model decision and the control-to-test traceability matrix
 - [docs/13-solution-justification.md](docs/13-solution-justification.md): why the design is enterprise-grade, concern by concern
 - [docs/14-manual-test-guide.md](docs/14-manual-test-guide.md): manual tests with expected output for every scenario
+- [html/index.html](html/index.html): HTML portal: summary, trust model, navigation to every page
 - [html/study-guide.html](html/study-guide.html): complete study material for administrators (foundations, every layer step by step, corner cases, gap implementations)
 
 ## Optional

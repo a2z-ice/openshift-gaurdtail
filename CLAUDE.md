@@ -21,7 +21,8 @@ AGENTS.md (imported above) is the single source for hard rules, facts, commands 
 for o in manifests/base manifests/overlays/*; do kustomize build "$o" >/dev/null && echo "OK $o"; done   # expect 84 objects each
 yamllint -c .yamllint manifests
 bash -n scripts/*.sh
-npm i --no-save mermaid@11 jsdom dompurify && node scripts/check-mermaid.mjs README.md docs/*.md
+npm i --no-save mermaid@11 jsdom dompurify marked && node scripts/check-mermaid.mjs README.md docs/*.md
+node scripts/build-html-docs.mjs            # regenerate html/docs/ after editing any Markdown (CI fails if stale)
 # CI invariants (grep-based; see .github/workflows/policy-ci.yaml "guardrail invariants" step)
 # inspect what a phase overlay actually changes
 kustomize build manifests/overlays/phase3-enforce | grep -A3 validationActions

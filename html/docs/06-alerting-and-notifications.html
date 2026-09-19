@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06-alerting-and-notifications · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>06 · Alerting and notifications (email + Microsoft Teams)</h1>
+<h2>Why two detection pipelines</h2>
+<table>
+<thead>
+<tr>
+<th>Pipeline</th>
+<th>Source</th>
+<th>Catches</th>
+<th>Blind when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Audit</strong> (Loki <code>AlertingRule</code>s, tenant <code>audit</code>)</td>
+<td>every API request, incl. denied ones, with the actor</td>
+<td>deletions, denied attempts, approvals, guardrail/RBAC/audit tampering, impersonation, break-glass, kubeadmin, node access</td>
+<td>audit forwarding is stopped</td>
+</tr>
+<tr>
+<td><strong>Metrics</strong> (<code>PrometheusRule</code>s, platform Prometheus)</td>
+<td>kube-state-metrics, Argo CD metrics, Loki metrics</td>
+<td>Argo CD gone / 0 replicas / no apps, namespace Terminating, operator missing, <strong>audit ingestion stalled</strong>, Loki ruler down, reaper failing</td>
+<td>Prometheus itself is down (which OpenShift alerts on separately via <code>Watchdog</code>)</td>
+</tr>
+</tbody></table>
+<p>Each covers the other&#39;s failure mode: stop the forwarder and <code>AuditLogIngestionStalled</code> fires from metrics; delete Argo CD and both <code>CriticalResourceDeleted</code> (audit) and <code>ArgoCDApplicationControllerMissing</code> (metrics) fire.</p>
+<h2>Alert catalogue</h2>
+<table>
+<thead>
+<tr>
+<th>Alert</th>
+<th>Pipeline</th>
+<th>Severity</th>
+<th>Channel</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CriticalResourceDeleted</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams, repeat 30 m</td>
+<td>a critical object was deleted <strong>out of band</strong> (workflow-approved or exempt). Verify the approvals; restore if unexpected</td>
+</tr>
+<tr>
+<td><code>GitOpsCriticalDeletionApplied</code></td>
+<td>audit</td>
+<td>warning</td>
+<td>Teams</td>
+<td>Argo CD pruned a critical object from Git; must correlate with a merged PR</td>
+</tr>
+<tr>
+<td><code>CriticalDeleteWouldBeDenied</code></td>
+<td>audit</td>
+<td>warning</td>
+<td>Teams</td>
+<td>phase 1/2 only: the request succeeded but would be denied in phase 3 (rollout signal)</td>
+</tr>
+<tr>
+<td><code>ArgoCDCredentialSecretDeleted</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>a Secret in openshift-gitops was deleted by a non-system identity (Tier B: only JIT admin or break-glass can)</td>
+</tr>
+<tr>
+<td><code>PrivilegedIdentityImpersonated</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>someone impersonated break-glass or an Argo CD controller (the one-command bypass)</td>
+</tr>
+<tr>
+<td><code>PrivilegedTokenMinted</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>a token was minted for break-glass, the reaper or an Argo CD SA</td>
+</tr>
+<tr>
+<td><code>GitOpsResourceDeleted</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>name-based fallback for GitOps namespaces/kinds, independent of the policy</td>
+</tr>
+<tr>
+<td><code>CriticalResourceDeleteDenied</code></td>
+<td>audit</td>
+<td>warning</td>
+<td>Teams</td>
+<td>blocked attempt; who and what</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionApprovalRecorded</code></td>
+<td>audit</td>
+<td>info</td>
+<td>Teams (batched)</td>
+<td>request/approval activity; expected during a planned deletion</td>
+</tr>
+<tr>
+<td><code>GuardrailPolicyModified</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>policy/binding/config/RBAC/reaper changed by anyone but Argo CD</td>
+</tr>
+<tr>
+<td><code>AuditProfileChanged</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td><code>APIServer/cluster</code> changed out of band</td>
+</tr>
+<tr>
+<td><code>AuditForwarderChanged</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>forwarder / LokiStack / rules changed out of band</td>
+</tr>
+<tr>
+<td><code>PrivilegedRBACChange</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>email + Teams (security)</td>
+<td>binding to cluster-admin or privileged group membership changed</td>
+</tr>
+<tr>
+<td><code>ImpersonationUsed</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>any write via <code>--as</code></td>
+</tr>
+<tr>
+<td><code>BreakGlassUsed</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>the exempt SA made any request</td>
+</tr>
+<tr>
+<td><code>KubeadminOrSystemAdminUsed</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>write by <code>kube:admin</code> / <code>system:admin</code></td>
+</tr>
+<tr>
+<td><code>ArgoCDDirectMutation</code></td>
+<td>audit</td>
+<td>warning</td>
+<td>Teams</td>
+<td>human edited a critical object directly (denied in phase 4)</td>
+</tr>
+<tr>
+<td><code>ControlPlaneNodeAccess</code></td>
+<td>audit</td>
+<td>critical</td>
+<td>security</td>
+<td>exec/debug in control-plane namespaces by a human</td>
+</tr>
+<tr>
+<td><code>ArgoCDApplicationControllerMissing</code> / <code>ArgoCDServerMissing</code> / <code>ArgoCDNoApplicationsReported</code> / <code>GitOpsOperatorMissing</code></td>
+<td>metrics</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>Argo CD availability</td>
+</tr>
+<tr>
+<td><code>GitOpsNamespaceTerminating</code></td>
+<td>metrics</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>protected namespace is being deleted</td>
+</tr>
+<tr>
+<td><code>GuardrailApplicationOutOfSyncOrMissing</code></td>
+<td>metrics</td>
+<td>warning</td>
+<td>Teams</td>
+<td>self-heal not working</td>
+</tr>
+<tr>
+<td><code>AuditLogIngestionStalled</code> / <code>AuditForwarderNotReady</code> / <code>LokiRulerDown</code></td>
+<td>metrics</td>
+<td>critical/warning</td>
+<td>email + Teams</td>
+<td>detection pipeline health</td>
+</tr>
+<tr>
+<td><code>GuardrailReaperFailing</code></td>
+<td>metrics</td>
+<td>warning</td>
+<td>Teams</td>
+<td>TTL enforcement not running</td>
+</tr>
+<tr>
+<td><code>GuardrailPolicyEvaluationErrors</code> / <code>GuardrailPolicyNotEvaluating</code> / <code>GuardrailPolicySlow</code></td>
+<td>metrics</td>
+<td>critical/warning</td>
+<td>email + Teams</td>
+<td>kube-apiserver VAP metrics: CEL errors, cost-budget exhaustion, policy missing, slow</td>
+</tr>
+<tr>
+<td><code>GuardrailNotificationFailing</code> / <code>GuardrailAlertmanagerConfigInvalid</code></td>
+<td>metrics</td>
+<td>critical</td>
+<td>email + Teams</td>
+<td>Teams/SMTP delivery failing or Alertmanager config not loading</td>
+</tr>
+</tbody></table>
+<p>Every alert carries <code>guardrail=&quot;true&quot;</code>, <code>severity</code>, <code>team</code>, a <code>summary</code>, a <code>description</code> with actor/object, and a <code>runbook_url</code> into docs/09.</p>
+<h2>Routing (<code>manifests/05-alerting/alertmanager-main.yaml</code>)</h2>
+<pre><code>route guardrail=&quot;true&quot; &amp; severity=&quot;critical&quot;  → receiver guardrail-red        group_wait 0s, group_interval 1m, repeat 30m, continue
+route guardrail=&quot;true&quot; &amp; severity=&quot;warning&quot;   → receiver guardrail-teams-only group_wait 15s, repeat 4h, continue
+route guardrail=&quot;true&quot; &amp; severity=&quot;info&quot;      → receiver guardrail-teams-only group_wait 1m, group_interval 10m
+route guardrail=&quot;true&quot;                        → receiver default (your existing on-call path, so nothing is lost if Teams/SMTP fail)
+</code></pre>
+<p>Inhibition: a confirmed <code>CriticalResourceDeleted</code> silences <code>CriticalResourceDeleteDenied</code> for the same object.</p>
+<p>Receivers: <code>guardrail-red</code> = <code>email_configs</code> (HTML template, <code>X-Priority: 1</code>) + <code>msteamsv2_configs</code>; <code>guardrail-teams-only</code> = Teams only. Templates live in the <code>guardrail.tmpl</code> key of the same secret and are referenced as <code>/etc/alertmanager/config/guardrail.tmpl</code> (the Prometheus Operator mounts every key of <code>alertmanager-main</code> there).</p>
+<h2>Microsoft Teams setup (Workflows, not the retired O365 connector)</h2>
+<p>Alertmanager ≥ 0.28 speaks the Teams <em>Workflows</em> (Power Automate) format natively (<code>msteamsv2_configs</code>); OCP 4.21 ships 0.29.0. No <code>prometheus-msteams</code> bridge.</p>
+<ol>
+<li>In Teams, open the target channel → <code>…</code> → <strong>Workflows</strong> → search &quot;Post to a channel when a webhook request is received&quot; → select the team and channel → <strong>Add workflow</strong>. Copy the HTTP POST URL (<code>https://prod-XX.&lt;region&gt;.logic.azure.com:443/workflows/&lt;id&gt;/triggers/manual/paths/invoke?...&amp;sig=...</code>).</li>
+<li>In Power Automate, open the flow and confirm the &quot;Post card in a chat or channel&quot; step posts <strong>as Flow bot</strong> with the adaptive card from the request body (the default template does).</li>
+<li>Store the URL in the vault; inject it into <code>alertmanager-main</code> (both <code>webhook_url</code> occurrences). The <code>sig=</code> query parameter is the secret: treat the URL as a credential (GitHub push protection is enabled in docs/08 for exactly this).</li>
+<li>Optional: a second workflow/channel for <code>team=&quot;security&quot;</code> alerts; add a route with <code>team=&quot;security&quot;</code> above the generic one.</li>
+</ol>
+<p>Test from inside the cluster without waiting for a real alert:</p>
+<pre><code class="language-bash">oc -n openshift-monitoring exec alertmanager-main-0 -c alertmanager -- \
+  amtool --alertmanager.url=http://localhost:9093 alert add \
+  alertname=CriticalResourceDeleted severity=critical guardrail=true team=platform-engineering \
+  objectRef_resource=configmaps objectRef_namespace=guardrails-test objectRef_name=synthetic user_username=&quot;$(oc whoami)&quot; \
+  --annotation=summary=&quot;SYNTHETIC test alert - ignore&quot; --annotation=description=&quot;Fired by $(oc whoami) to verify Teams + email delivery&quot; \
+  --annotation=runbook_url=https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md
+</code></pre>
+<p>Expected: Teams card and email within ~10 s (group_wait 0). Then <code>amtool alert query</code> and <code>amtool silence add alertname=CriticalResourceDeleted objectRef_name=synthetic -d 5m -c test</code>.</p>
+<h2>Email (SMTP)</h2>
+<p><code>global.smtp_*</code> in the Alertmanager config; use a relay that requires TLS and authentication; the password comes from the vault. Distribution lists (<code>platform-oncall@</code>, <code>security-oncall@</code>) rather than individuals. Consider an additional <code>email_configs</code> entry to your ticketing system&#39;s mail-to-ticket address so every red alert opens an incident automatically.</p>
+<h2>Installing the Alertmanager config</h2>
+<pre><code class="language-bash"># render the two keys with the real secrets (from vault) into a temp dir, then:
+oc -n openshift-monitoring create secret generic alertmanager-main \
+  --from-file=alertmanager.yaml=./alertmanager.yaml --from-file=guardrail.tmpl=./guardrail.tmpl \
+  --dry-run=client -o yaml | oc replace -f -
+oc -n openshift-monitoring label secret alertmanager-main guardrails.example.com/critical=true --overwrite
+# validate
+oc -n openshift-monitoring exec alertmanager-main-0 -c alertmanager -- amtool check-config /etc/alertmanager/config_out/alertmanager.env.yaml
+oc -n openshift-monitoring logs alertmanager-main-0 -c alertmanager --since=2m | grep -i -E &#39;error|reload&#39;
+</code></pre>
+<p>If your organisation forbids editing the platform Alertmanager, <code>alertmanagerconfig-uwm-alternative.yaml</code> documents the <code>AlertmanagerConfig</code> path and its limitations (namespace matcher, <code>enableUserAlertmanagerConfig</code>).</p>
+<h2>Loki AlertingRules (<code>loki-alertingrules-audit.yaml</code>)</h2>
+<ul>
+<li><code>tenantID: audit</code>; namespace <code>openshift-logging</code> (must be labelled <code>openshift.io/cluster-monitoring=true</code>); object labelled <code>openshift.io/log-alerting=true</code> to match the LokiStack <code>rules.selector</code>.</li>
+<li>In <code>openshift-logging</code> tenant mode the Loki Operator wires the ruler to the platform Alertmanager automatically (<code>RulerConfig</code> only needed for a non-default Alertmanager).</li>
+<li>Rules use <code>count_over_time(... [2m]) &gt; 0</code>, <code>interval: 30s</code>, <code>for: 0s</code> → worst-case detection latency ≈ 30 s + ingestion (~5–10 s). Rules on writes filter <code>objectRef_subresource=&quot;&quot;</code> so controller status updates never page, and every rule excludes the known system identities (Argo CD SAs, kube-system controllers, logging operators, group sync).</li>
+<li>Field names come from Loki&#39;s <code>json</code> parser (see docs/02). After a Logging major upgrade re-run <code>scripts/test-guardrails.sh</code> to prove the rules still match.</li>
+</ul>
+<h2>Verification</h2>
+<pre><code class="language-bash">oc get alertingrule -n openshift-logging guardrails-audit-alerts -o jsonpath=&#39;{.status.conditions}&#39;; echo
+oc -n openshift-logging logs -l app.kubernetes.io/component=ruler --tail=50 | grep -i guardrails
+oc get prometheusrule -n openshift-gitops guardrails-gitops-health
+# rules loaded in Prometheus?
+oc -n openshift-monitoring exec -c prometheus prometheus-k8s-0 -- curl -s &#39;http://localhost:9090/api/v1/rules&#39; | grep -o &#39;ArgoCDApplicationControllerMissing&#39; | head -1
+# fire a real one: delete a labelled scratch configmap through the workflow (docs/11) and time the Teams post
+</code></pre>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/06-alerting-and-notifications.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

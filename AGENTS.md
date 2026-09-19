@@ -76,7 +76,7 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server
 | Audit findings, fixes, test traceability | `docs/16-production-readiness-review.md` |
 | Justify the design to reviewers | `docs/13-solution-justification.md` |
 | Manual test with expected output | `docs/14-manual-test-guide.md` (T-numbered scenarios) |
-| Learn the whole design step by step | `html/study-guide.html` (open in a browser) |
+| Learn the whole design step by step | `html/index.html` (portal) → `html/study-guide.html`; `html/docs/*.html` are generated from the Markdown by `scripts/build-html-docs.mjs` (regenerate after editing docs) |
 | Extra hardening (OAuth tokens, VAP health alerts, etcd backup, LDAP sync, SSH lockdown, etcd encryption) | `manifests/07-hardening-extras/*` |
 | Machine-readable facts | `llm/context.yaml` |
 | Shared state / memory | `llm/memory.md` |

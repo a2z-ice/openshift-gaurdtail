@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16-production-readiness-review · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>16 · Production readiness review: findings, fixes and test traceability</h1>
+<p><strong>Method.</strong> Two independent reviewers with no prior context audited the repository on 2026-09-18/19: one the manifests and CEL (16 tool passes, 27 findings), one the scripts, tests, CI and every document against the manifests (26 passes, 32 findings). The author then triaged all 59, fixed every Critical/High/Medium item and the Low items that were cheap, and recorded the rest as accepted with a reason. In parallel the platform owner changed the trust model (§1). Everything below reflects the repository as it is now.</p>
+<p><strong>Verdict.</strong> The central mechanism (on-object approvals validated by a built-in <code>ValidatingAdmissionPolicy</code>) survived both audits unchanged: the CEL was found sound. The defects were in the surrounding RBAC, Argo CD wiring, alert logic, shell tooling and documentation accuracy. With the fixes in this review applied, the design is production-grade <em>as defined in §5</em>; two items still require observation on your own cluster (R3, R6 in <code>docs/01</code>).</p>
+<h2>1. Trust-model decision (platform owner, 2026-09-19)</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Approval</th>
+<th>Cluster-side rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>GitOps</strong>: a commit merged under the repository ruleset (2 reviewers, code owners, CI invariants, signed) and applied by the Argo CD application-controller or ApplicationSet controller</td>
+<td>in Git</td>
+<td>none; identities in <code>GuardrailConfig.spec.gitopsControllers</code> are exempt; deletions alerted as <code>GitOpsCriticalDeletionApplied</code> for PR correlation</td>
+</tr>
+<tr>
+<td><strong>Out of band</strong>: <code>oc</code>, console, Argo CD UI/CLI (<code>argocd-server</code>), other controllers, humans, cluster-admin</td>
+<td>request + 2 approvers + executor on the cluster</td>
+<td><code>guardrails-critical-delete</code> (V1–V4), <code>guardrails-critical-label-control</code>, <code>guardrails-gitops-only-mutation</code> (+ <code>-hardened</code>)</td>
+</tr>
+</tbody></table>
+<p>Consequences implemented: <code>gitopsControllers</code> added to the CRD and the three policies; the guardrails Application prunes (<code>prune: true</code>); <code>CriticalResourceDeleted</code> fires only for out-of-band deletions; new alert <code>GitOpsCriticalDeletionApplied</code>; CI refuses <code>argocd-server</code> or any human in <code>gitopsControllers</code>; all documents, the skills and the study guide were rewritten accordingly. New residual risk R7 (repository/controller-token compromise) added to <code>docs/01</code> with its compensating controls.</p>
+<h2>2. Findings and resolutions</h2>
+<p>Severity as assessed by the reviewers. <strong>Fixed</strong> = implemented in this repository; <strong>Accepted</strong> = deliberately not changed, reason given.</p>
+<h3>Critical</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>C1</td>
+<td><code>guardrails-approver</code> ClusterRole granted cluster-wide <code>get/list/patch</code> on Secrets, ConfigMaps, Namespaces, ServiceAccounts, CronJobs, CSVs, Subscriptions, CRDs, Groups, policies and cluster RBAC to approvers <strong>and</strong> requesters: read every Secret, patch the reaper CronJob to run as break-glass, add yourself to <code>platform-admins</code>. <code>guardrails-executor</code> could delete any non-critical Namespace/Secret cluster-wide.</td>
+<td><strong>Fixed.</strong> <code>02-rbac/clusterroles.yaml</code> rewritten: cluster-scoped kinds only via <code>resourceNames</code>; namespaced kinds via <code>rolebindings.yaml</code> in the platform namespaces; <strong>Tier B</strong> (Namespaces, CRDs, OLM objects, Secrets, ServiceAccounts) removed from every human role (Git or break-glass only). Tests: automated §2, manual T2.2.</td>
+</tr>
+<tr>
+<td>C2</td>
+<td>Phase 3 did not deliver the headline claim: a cluster-admin could <code>oc patch vapb … validationActions=[Audit]</code> or add themselves to <code>exemptUsers</code>, then delete, because the GitOps-only policy was Audit until phase 4 and V2–V4 only constrain annotation writes.</td>
+<td><strong>Fixed.</strong> New binding <code>guardrails-gitops-only-mutation-hardened</code>, <code>[Deny, Audit]</code> in <strong>every</strong> phase, scoped to the self-protection set (GuardrailConfig, policies/bindings, <code>guardrails-*</code> RBAC, privileged Groups, APIServer/OAuth, labelled CronJobs). Approval annotations still allowed. Tests: automated §4, manual T3.7/T3.8/T8.1.</td>
+</tr>
+<tr>
+<td>C3</td>
+<td><code>patch groups</code> let any approver add themselves to <code>platform-admins</code> (Groups have no RBAC escalation check and were not in the GitOps-only policy).</td>
+<td><strong>Fixed.</strong> Groups added to the GitOps-only policy with <code>users</code> compared; covered by the hardened binding; the group-sync SA is the documented trusted writer. Test: automated §4.</td>
+</tr>
+<tr>
+<td>C4</td>
+<td>Argo CD <code>role:operator</code> allowed <code>applications, override</code> (<code>sync --local</code> any manifest as the controller) and create/update in the <code>guardrails</code> project (point it at any branch) and full ApplicationSet rights.</td>
+<td><strong>Fixed.</strong> <code>override</code> denied; create/update in <code>guardrails/*</code> denied; ApplicationSet create/update denied. Test: manual §5 <code>argocd account can-i</code>.</td>
+</tr>
+</tbody></table>
+<h3>High</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>H1</td>
+<td>The <code>guardrails</code> Application could not sync: AppProject destinations lacked <code>openshift-operators-redhat</code>, <code>openshift-etcd-backup</code>, <code>openshift-kube-apiserver</code> and the whitelist lacked <code>OAuth</code>. Self-heal of the control was dead.</td>
+<td><strong>Fixed</strong> (destinations + whitelist + <code>openshift-monitoring</code>). <code>verify-install.sh</code> now asserts Synced/Healthy. Test: manual D2.</td>
+</tr>
+<tr>
+<td>H2</td>
+<td><code>resourceExclusions: guardrails.example.com/*</code> hid <code>GuardrailConfig</code> from Argo CD itself (PR changes never applied).</td>
+<td><strong>Fixed</strong> (exclusion removed; fencing stays via AppProject whitelists).</td>
+</tr>
+<tr>
+<td>H3</td>
+<td><code>parameterNotFoundAction: Deny</code> on the broad named binding = cluster-wide outage for OLM/namespaces/RBAC if <code>GuardrailConfig</code> were missing.</td>
+<td><strong>Fixed</strong> (named binding <code>Allow</code>; labelled binding stays <code>Deny</code>; absence alerted).</td>
+</tr>
+<tr>
+<td>H4</td>
+<td>Reaper SA over-privileged (read all Secrets, patch Groups/VAPs/RBAC) and a <em>trusted writer</em> in the GitOps-only policy: any pod in <code>guardrails-system</code> could edit every critical object.</td>
+<td><strong>Fixed.</strong> Reaper ClusterRole trimmed to Tier-A annotation targets; removed from <code>isTrustedWriter</code> (its annotation-only change passes on its own). NetworkPolicy default-deny added to <code>guardrails-system</code>.</td>
+</tr>
+<tr>
+<td>H5</td>
+<td>OLM&#39;s deletion of a superseded CSV in <code>openshift-gitops-operator</code> was denied → GitOps operator upgrades would wedge.</td>
+<td><strong>Fixed</strong> (<code>olmServiceAccounts</code> V1 clause).</td>
+</tr>
+<tr>
+<td>H6</td>
+<td><code>GuardrailPolicyModified</code> paged every 10 min on <code>cronjobs/status</code> and VAP status writes.</td>
+<td><strong>Fixed</strong> (<code>objectRef_subresource=&quot;&quot;</code>, kube-system and trusted identities excluded, in all integrity rules).</td>
+</tr>
+<tr>
+<td>H7</td>
+<td>Minting tokens for exempt/trusted SAs was unalerted; impersonating them was the undocumented one-command bypass.</td>
+<td><strong>Fixed.</strong> New alerts <code>PrivilegedTokenMinted</code>, <code>PrivilegedIdentityImpersonated</code>; <code>ControlPlaneNodeAccess</code> extended to the GitOps namespaces; break-glass mint restricted to the <code>breakglass-custodians</code> Role; R1 rewritten. Tests: manual T7.4, T13.</td>
+</tr>
+<tr>
+<td>H8</td>
+<td>Test setup labelled scratch objects as cluster-admin → denied by label control in phase 3; the whole matrix was invalid.</td>
+<td><strong>Fixed</strong> (approver labels; phase-aware expectations).</td>
+</tr>
+<tr>
+<td>H9</td>
+<td>Test cleanup left the namespace Terminating forever and broke the next run.</td>
+<td><strong>Fixed</strong> (cleanup runs the full workflow on each remaining critical object; aborts if the namespace is Terminating).</td>
+</tr>
+<tr>
+<td>H10</td>
+<td>go-template <code>index</code> on a missing key printed <code>&lt;no value&gt;</code>, breaking every script&#39;s state logic.</td>
+<td><strong>Fixed</strong> (<code>{{with index . &quot;k&quot;}}{{.}}{{end}}</code> everywhere).</td>
+</tr>
+<tr>
+<td>H11</td>
+<td>Scripts failed on bash 3.2 (macOS) for cluster-scoped targets (<code>&quot;${NSARGS[@]}&quot;</code> with <code>set -u</code>).</td>
+<td><strong>Fixed</strong> (<code>${NSARGS[@]+&quot;${NSARGS[@]}&quot;}</code>), verified on bash 3.2.57.</td>
+</tr>
+<tr>
+<td>H12</td>
+<td>Reaper aborted at the first kind whose CRD was absent (<code>pipefail</code>).</td>
+<td><strong>Fixed</strong> (`</td>
+</tr>
+<tr>
+<td>H13</td>
+<td>CI red on the first PR (shellcheck exit on style findings; <code>if: env.X</code> never true for the pre-prod dry-run; grep invariants matched comments and could be slipped).</td>
+<td><strong>Fixed</strong> (<code>--severity=warning</code>; job-level <code>HAS_PREPROD</code>; invariants rewritten in Python over parsed YAML, incl. <code>argocd-server ∉ gitopsControllers</code>).</td>
+</tr>
+</tbody></table>
+<h3>Medium</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>M1</td>
+<td><code>payloadUnchanged</code> ignored <code>aggregationRule</code>, <code>binaryData</code>, <code>immutable</code>, Application <code>operation</code>, <code>metadata.finalizers</code>, <code>metadata.ownerReferences</code>; GitOps-only policy did not cover Groups, Roles, CronJobs, ServiceAccounts, AlertmanagerConfigs, NetworkPolicies.</td>
+<td><strong>Fixed</strong> in both policies.</td>
+</tr>
+<tr>
+<td>M2</td>
+<td>Delete alerts missed <code>deletecollection</code>; <code>GitOpsResourceDeleted</code> paged on ApplicationSet prunes and OLM CSV replacement.</td>
+<td><strong>Fixed</strong> (`delete</td>
+</tr>
+<tr>
+<td>M3</td>
+<td>Phases 1–2 had no &quot;would have been denied&quot; signal.</td>
+<td><strong>Fixed</strong> (<code>CriticalDeleteWouldBeDenied</code>).</td>
+</tr>
+<tr>
+<td>M4</td>
+<td><code>CriticalDeletionApprovalRecorded</code> did not fire on the request itself.</td>
+<td><strong>Fixed</strong> (matches request or approvals in the body).</td>
+</tr>
+<tr>
+<td>M5</td>
+<td>Namespaced <code>guardrails-*</code> Roles/RoleBindings not name-protected.</td>
+<td><strong>Fixed</strong> (named binding covers <code>roles</code>, <code>rolebindings</code>).</td>
+</tr>
+<tr>
+<td>M6</td>
+<td>Audit-pipeline dependencies (<code>openshift-operators-redhat</code>) not critical; Splunk CA referenced unconditionally (CLF Degraded if absent).</td>
+<td><strong>Fixed</strong> (namespace labelled; CA block optional).</td>
+</tr>
+<tr>
+<td>M7</td>
+<td><code>AuditLogIngestionStalled</code> timing documented as 12 min, actual ~20.</td>
+<td><strong>Fixed</strong> (docs and test guide).</td>
+</tr>
+<tr>
+<td>M8</td>
+<td><code>oc auth can-i --as</code> raised <code>ImpersonationUsed</code>.</td>
+<td><strong>Fixed</strong> (access reviews excluded).</td>
+</tr>
+<tr>
+<td>M9</td>
+<td>Runbook token revocation used <code>useroauthaccesstokens</code> (own tokens only) and claimed SA tokens can be rotated.</td>
+<td><strong>Fixed</strong> (correct command; bound-token limits stated).</td>
+</tr>
+<tr>
+<td>M10</td>
+<td>CI invariant 3 (<code>exemptUsers</code>) bypassable; kubeconform could pass vacuously.</td>
+<td><strong>Fixed</strong> (parsed-YAML invariants; schema version <code>master</code>).</td>
+</tr>
+<tr>
+<td>M11</td>
+<td>Auditors could not read the Loki audit tenant.</td>
+<td><strong>Fixed</strong> (<code>cluster-logging-audit-view</code> binding).</td>
+</tr>
+<tr>
+<td>M12</td>
+<td>Docs disagreed on counts, trusted mutators, &quot;approvals are wiped&quot; (V4 denies unless cleared), RBAC claims.</td>
+<td><strong>Fixed</strong> across docs, AGENTS.md, context, skills, study guide.</td>
+</tr>
+<tr>
+<td>M13</td>
+<td><code>execute-deletion.sh</code> would hang on namespaces; Tier-B kinds not guarded.</td>
+<td><strong>Fixed</strong> (<code>--wait=false</code>; Tier-B refusal).</td>
+</tr>
+<tr>
+<td>M14</td>
+<td>Test matrix cases passing for RBAC reasons instead of policy; reaper cases vacuous; sign-off mode still impersonated.</td>
+<td><strong>Fixed</strong> (explicit executor-role case, reaper via Job, SA cases skipped in sign-off mode).</td>
+</tr>
+<tr>
+<td>M15</td>
+<td><code>verify-install.sh</code> miscounted approvers, relied on an undocumented <code>Ready</code> condition, missed new policies.</td>
+<td><strong>Fixed.</strong></td>
+</tr>
+<tr>
+<td>M16</td>
+<td>etcd snapshots unencrypted while etcd encryption was only an example; CronJob used <code>hostNetwork</code>.</td>
+<td><strong>Fixed</strong> (<code>APIServer.spec.encryption.type: aesgcm</code> in base; <code>hostNetwork</code> removed).</td>
+</tr>
+</tbody></table>
+<h3>Low and accepted</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>L1</td>
+<td>Info route lacked <code>continue</code>; inhibit rule 1 was a no-op.</td>
+<td><strong>Fixed.</strong></td>
+</tr>
+<tr>
+<td>L2</td>
+<td><code>controller.diff.server.side</code> in <code>extraConfig</code> is a no-op.</td>
+<td><strong>Fixed</strong> (<code>spec.controller.env</code>).</td>
+</tr>
+<tr>
+<td>L3</td>
+<td>Images by tag, not digest.</td>
+<td><strong>Accepted</strong>: digests differ per mirror; documented in <code>docs/00</code> as a placeholder to pin during A4.</td>
+</tr>
+<tr>
+<td>L4</td>
+<td>MachineConfig <code>sshAuthorizedKeys: []</code> does not remove installer keys (MCO merges).</td>
+<td><strong>Fixed in text</strong>: masking <code>sshd</code> is the effective control; the installer MachineConfig must be edited in the same PR.</td>
+</tr>
+<tr>
+<td>L5</td>
+<td><code>includeClusterResources: true</code> backed up all cluster-scoped objects 6-hourly.</td>
+<td><strong>Fixed</strong> (omitted → related only).</td>
+</tr>
+<tr>
+<td>L6</td>
+<td><code>runbookURL</code> and every <code>runbook_url</code> are dead until placeholders are replaced.</td>
+<td><strong>Accepted</strong>: covered by the placeholder sweep (now also covers README, CLAUDE.md, llms.txt, html, .cursor).</td>
+</tr>
+<tr>
+<td>L7</td>
+<td><code>oc delete project --dry-run</code> propagation not guaranteed.</td>
+<td><strong>Fixed in text</strong> (phase-3-only note).</td>
+</tr>
+<tr>
+<td>L8</td>
+<td>Owners are all &quot;platform-engineering&quot;.</td>
+<td><strong>Accepted</strong>: organisation-specific; fill in A2.</td>
+</tr>
+<tr>
+<td>L9</td>
+<td><code>.claude/settings.json</code> denies <code>oc --as=</code> only as a prefix.</td>
+<td><strong>Accepted</strong>: defence in depth only; the alert is the control.</td>
+</tr>
+</tbody></table>
+<h2>3. Test traceability matrix</h2>
+<p>Every control has at least one automated case (A = section/case in <code>scripts/test-guardrails.sh</code>, which is phase-aware) or a manual case (M = T-number in <code>docs/14</code>), and the alert that proves detection. &quot;verify&quot; = <code>scripts/verify-install.sh</code>. Nothing is uncovered.</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>A</th>
+<th>M</th>
+<th>Alert / evidence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>V1</strong> out-of-band delete without approvals (cluster-admin)</td>
+<td>§3</td>
+<td>T3.1</td>
+<td>CriticalResourceDeleteDenied / CriticalDeleteWouldBeDenied</td>
+</tr>
+<tr>
+<td>V1 delete by selector (deletecollection)</td>
+<td>§3</td>
+<td>T3.3</td>
+<td>same</td>
+</tr>
+<tr>
+<td>V1 name-protected: ArgoCD CR, namespace, CRD, GuardrailConfig, binding (R3), group, <code>guardrails-*</code> CRB, Subscription, CLF, Application</td>
+<td>§3 (dry-run)</td>
+<td>T3.4–T3.9</td>
+<td>same</td>
+</tr>
+<tr>
+<td>V1 with 1 approval</td>
+<td>§6</td>
+<td>T4.11</td>
+<td>same</td>
+</tr>
+<tr>
+<td>V1 executor ∈ approvers (policy, not RBAC)</td>
+<td>§6 <code>approver1-executor</code></td>
+<td>T4.15</td>
+<td>same</td>
+</tr>
+<tr>
+<td>V1 happy path → deleted</td>
+<td>§6</td>
+<td>T5.1, T5.2</td>
+<td><strong>CriticalResourceDeleted</strong> (email + Teams, timing T9.2)</td>
+</tr>
+<tr>
+<td>V1 after cancel</td>
+<td>§7</td>
+<td>T6.1</td>
+<td>denied</td>
+</tr>
+<tr>
+<td>V1 OLM CSV replacement allowed</td>
+<td>–</td>
+<td>operator upgrade on pre-prod (Part B2 re-run)</td>
+<td>no CriticalResourceDeleteDenied for OLM SA</td>
+</tr>
+<tr>
+<td>V1 GitOps path exempt (controller prune)</td>
+<td>§9 (impersonation)</td>
+<td>T7.1</td>
+<td><strong>GitOpsCriticalDeletionApplied</strong></td>
+</tr>
+<tr>
+<td>V1 Argo CD UI/CLI (<code>argocd-server</code>) not exempt</td>
+<td>§9</td>
+<td>T7.3</td>
+<td>CriticalResourceDeleteDenied</td>
+</tr>
+<tr>
+<td>V1 break-glass exempt</td>
+<td>–</td>
+<td>T13</td>
+<td>BreakGlassUsed, decision <code>exempt=true</code></td>
+</tr>
+<tr>
+<td><strong>V2</strong> label removal denied</td>
+<td>§3</td>
+<td>T3.2</td>
+<td>denied</td>
+</tr>
+<tr>
+<td><strong>V3</strong> forged (admin writes 2), wrong name, own request, before request, malformed, smuggled data, duplicate, list replaced</td>
+<td>§5, §6</td>
+<td>T4.1, T4.4, T4.6–T4.9, T4.12, T4.13</td>
+<td>denied</td>
+</tr>
+<tr>
+<td>V3 valid approvals append</td>
+<td>§6</td>
+<td>T4.10, T4.14</td>
+<td>CriticalDeletionApprovalRecorded</td>
+</tr>
+<tr>
+<td>V3 reaper remove-only; cannot add</td>
+<td>§8</td>
+<td>T6.2</td>
+<td>GuardrailReaperFailing (negative)</td>
+</tr>
+<tr>
+<td><strong>V4</strong> request by someone else&#39;s name; developer outside groups; reason edited after approvals; cancel by third party</td>
+<td>§5, §6, §7</td>
+<td>T4.2, T4.3, T4.16, T6.1</td>
+<td>denied / allowed</td>
+</tr>
+<tr>
+<td><strong>Label control</strong> UPDATE by requester/admin denied, approver allowed; CREATE with label denied</td>
+<td>§1</td>
+<td>T3.10</td>
+<td>denied</td>
+</tr>
+<tr>
+<td><strong>GitOps-only (phase 4)</strong> human spec edit denied; trusted identities allowed</td>
+<td>§4 (phase-aware)</td>
+<td>T2.3</td>
+<td>ArgoCDDirectMutation (phases 1–3)</td>
+</tr>
+<tr>
+<td><strong>Hardened binding (every phase)</strong> validationActions, exemptUsers, Group.users, reaper CronJob SA; annotations still allowed</td>
+<td>§4</td>
+<td>T3.7, T3.8, T8.1</td>
+<td>GuardrailPolicyModified</td>
+</tr>
+<tr>
+<td><strong>RBAC least privilege</strong> approver cannot read/list Secrets, cannot delete; requester cannot delete namespaces (Tier B)</td>
+<td>§2</td>
+<td>T2.2</td>
+<td>RBAC Forbidden</td>
+</tr>
+<tr>
+<td>RBAC-escalation policy warns + stamps</td>
+<td>§10</td>
+<td>T14</td>
+<td>PrivilegedRBACChange</td>
+</tr>
+<tr>
+<td>Reaper TTL expiry and future-dated entries</td>
+<td>§8</td>
+<td>T6.2</td>
+<td>job log</td>
+</tr>
+<tr>
+<td>Phase-1 annotation / phase-2 warning</td>
+<td>phase-aware run</td>
+<td>T1.1 / T15</td>
+<td>CriticalDeleteWouldBeDenied</td>
+</tr>
+<tr>
+<td>Self-heal after break-glass edit</td>
+<td>–</td>
+<td>T8.1</td>
+<td>GuardrailPolicyModified + BreakGlassUsed</td>
+</tr>
+<tr>
+<td>Impersonation of approver / of exempt identity / token mint</td>
+<td>§9 side-effect</td>
+<td>T12, T7.4, T13</td>
+<td>ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted</td>
+</tr>
+<tr>
+<td>kubeadmin / system:admin write</td>
+<td>–</td>
+<td>B1 (kubeadmin removed; verify)</td>
+<td>KubeadminOrSystemAdminUsed</td>
+</tr>
+<tr>
+<td>Control-plane exec / debug</td>
+<td>–</td>
+<td><code>oc debug node</code> on pre-prod once</td>
+<td>ControlPlaneNodeAccess</td>
+</tr>
+<tr>
+<td>Audit profile / forwarder / rules change out of band</td>
+<td>–</td>
+<td>T3.8, T10.1</td>
+<td>AuditProfileChanged, AuditForwarderChanged</td>
+</tr>
+<tr>
+<td>Argo CD credential Secret deleted</td>
+<td>–</td>
+<td>break-glass delete of a scratch Secret in openshift-gitops (pre-prod)</td>
+<td>ArgoCDCredentialSecretDeleted</td>
+</tr>
+<tr>
+<td>Argo CD availability (controller/server/apps/operator missing, namespace Terminating, guardrails app OutOfSync)</td>
+<td>verify (Synced/Healthy)</td>
+<td>docs/11 §Alert delivery item 4; §17 cleanup shows Terminating</td>
+<td>ArgoCD*Missing, GitOpsNamespaceTerminating, GuardrailApplicationOutOfSyncOrMissing</td>
+</tr>
+<tr>
+<td>Detection pipeline health (ingestion stalled, forwarder, ruler, reaper, VAP errors/absent/slow, notification failures, AM config)</td>
+<td>verify (rules present)</td>
+<td>T10.1; synthetic <code>amtool</code> T9.1; rotate the Teams URL to a bad value on pre-prod for <code>GuardrailNotificationFailing</code></td>
+<td>respective alerts</td>
+</tr>
+<tr>
+<td>Synthetic delivery, repeat interval, inhibition</td>
+<td>–</td>
+<td>T9.1, T9.3</td>
+<td>Teams + email</td>
+</tr>
+<tr>
+<td>Argo CD hardening: no finalizer, prune, selfHeal, disableAdmin, RBAC deny delete/override, AppProject fencing</td>
+<td>verify + CI invariants</td>
+<td>T7.2, docs/05 <code>argocd account can-i</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>Git side: ruleset, CI invariants (Deny present, no human/argocd-server in exempt lists, finalizer, secrets)</td>
+<td>CI</td>
+<td>T11.1, T11.2</td>
+<td>–</td>
+</tr>
+<tr>
+<td>Backup schedule / restore drill</td>
+<td>verify (last backup)</td>
+<td>T16</td>
+<td>–</td>
+</tr>
+<tr>
+<td>Identity: kubeadmin removed, no User on cluster-admin, ≥ 4 approvers, break-glass custodians</td>
+<td>verify</td>
+<td>B1</td>
+<td>–</td>
+</tr>
+<tr>
+<td>Test re-runnability (namespace not left Terminating)</td>
+<td>§11</td>
+<td>§17</td>
+<td>–</td>
+</tr>
+</tbody></table>
+<h2>4. What &quot;production-grade&quot; means here, and what remains</h2>
+<p>Met: least-privilege RBAC with explicit tiers; fail-closed enforcement in kube-apiserver with self-protection from phase 1; independent detection pipelines with health alerts on the alerting itself; reproducible, phase-aware tests with retained evidence; documented and rehearsed break-glass; backups with encryption at rest; Git as the single source of truth under a no-bypass ruleset; every claim in the documents traceable to a manifest and a test.</p>
+<p>Still to observe on your cluster (cannot be proven locally): R3 (does VAP evaluate deletes of its own bindings on your build), R6 (Loki field names after Logging upgrades), the CEL compile on the API server (first <code>--dry-run=server</code> in Part C1), and the real latency of alert delivery (T9.2).</p>
+<p>Accepted residual risks: R1 (impersonation of exempt identities by a JIT cluster-admin: alerted, provable), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/16-production-readiness-review.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

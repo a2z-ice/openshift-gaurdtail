@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09-runbooks · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>09 · Runbooks</h1>
+<p>All commands assume <code>oc</code> is logged in with a personal IdP identity. Never use <code>kubeadmin</code>, <code>system:admin</code> or the break-glass token for routine work; each of those raises a P1.</p>
+<h2>Request, approve and execute a deletion</h2>
+<p><strong>Is the object managed from Git?</strong> Then delete it with a PR (two reviewers); Argo CD prunes it and <code>GitOpsCriticalDeletionApplied</code> confirms. The workflow below is for <strong>out-of-band</strong> deletions (objects not in Git, emergencies). <strong>Tier-B kinds</strong> (namespaces, CRDs, OLM objects, Secrets, ServiceAccounts) cannot be deleted by the workflow roles; use Git, or break-glass.</p>
+<p>Roles: <strong>requester</strong> (<code>gitops-deletion-requesters</code> or an approver), <strong>two approvers</strong> (<code>gitops-deletion-approvers</code>, not the requester), <strong>executor</strong> (<code>gitops-deletion-requesters</code>, not an approver). Change ticket first.</p>
+<ol>
+<li>Requester:<pre><code class="language-bash">scripts/request-deletion.sh &lt;resource&gt; &lt;name&gt; [-n &lt;ns&gt;] &quot;CHG0012345: &lt;reason&gt;&quot;
+</code></pre>
+Post the change ticket and the object in the Teams channel; the <code>CriticalDeletionApprovalRecorded</code> info alert appears there too.</li>
+<li>Approver 1, then approver 2, each from their own session:<pre><code class="language-bash">scripts/approve-deletion.sh &lt;resource&gt; &lt;name&gt; [-n &lt;ns&gt;]
+</code></pre>
+The script shows the request and asks for the literal word <code>approve</code>. It fails if you are the requester, already approved, or not in the group.</li>
+<li>Executor, within <code>approvalTTL</code> (4 h):<pre><code class="language-bash">scripts/execute-deletion.sh &lt;resource&gt; &lt;name&gt; [-n &lt;ns&gt;]
+</code></pre>
+The red <code>CriticalResourceDeleted</code> alert to email + Teams is <strong>expected</strong>; acknowledge it in the channel with the change ticket.</li>
+<li>If the object is managed by Argo CD, merge the PR that removes it from Git in the same change window, otherwise self-heal recreates it.</li>
+</ol>
+<p>Cancel at any time: <code>scripts/cancel-deletion.sh &lt;resource&gt; &lt;name&gt; [-n &lt;ns&gt;]</code>.</p>
+<h3>Deletion denied</h3>
+<p>Message <code>GUARDRAIL DENIED: …</code> tells you what is missing. Check state: <code>scripts/request-deletion.sh</code> output or</p>
+<pre><code class="language-bash">oc get &lt;resource&gt; &lt;name&gt; -n &lt;ns&gt; -o jsonpath=&#39;{.metadata.annotations}&#39; | tr &#39;,&#39; &#39;\n&#39; | grep guardrails
+</code></pre>
+<p>Common causes: only one approval; approver was also the requester; executor is one of the approvers (<code>executorMayBeApprover=false</code>); approvals expired or future-dated (reaper removed them: re-approve); an attempt to change the request text without clearing approvals (denied by V4: use <code>request-deletion.sh</code> again); approver not in <code>gitops-deletion-approvers</code> (IdP sync lag: <code>oc get group gitops-deletion-approvers</code>); a Tier-B kind (RBAC Forbidden: Git or break-glass).</p>
+<h2>Respond to a red alert</h2>
+<p><code>CriticalResourceDeleted</code>, <code>GitOpsResourceDeleted</code>, <code>GitOpsNamespaceTerminating</code>, <code>ArgoCD*Missing</code>:</p>
+<ol>
+<li><strong>Acknowledge</strong> in Teams within 5 min (on-call). Open an incident if there is no change ticket referenced in the last <code>CriticalDeletionApprovalRecorded</code> message for that object.</li>
+<li><strong>Attribute</strong>: <code>scripts/audit-query.sh &lt;name&gt;</code> (or the LogQL/SPL it prints). Confirm actor, <code>impersonatedUser</code>, approvers list in <code>annotations_guardrails_critical_delete_decision</code>, source IP, user agent.</li>
+<li><strong>Classify</strong>:<ul>
+<li>approved via the workflow with a valid ticket → expected; close.</li>
+<li><code>gitops=true</code> (<code>GitOpsCriticalDeletionApplied</code>) with a merged PR that removed the object → expected GitOps path; link the PR. <strong>No PR</strong> → the controller identity is compromised: treat as <code>CriticalResourceDeleted</code>, check <code>PrivilegedTokenMinted</code> and <code>ControlPlaneNodeAccess</code>, rotate by restarting the controller pods (bound tokens expire) and page security.</li>
+<li>exempt identity (<code>exempt=true</code>): break-glass or <code>system:apiserver</code> → must map to an open break-glass incident; otherwise treat as compromise.</li>
+<li>impersonation present → security incident (forged approval).</li>
+<li>no <code>decision</code> annotation at all on a delete of a GitOps object → the policy did not evaluate: check <code>GuardrailPolicyModified</code> history immediately.</li>
+</ul>
+</li>
+<li><strong>Contain</strong>: if compromise is suspected, revoke the actor&#39;s OAuth tokens as an admin (<code>oc delete oauthaccesstokens --field-selector=userName=&lt;user&gt;</code>; <code>useroauthaccesstokens</code> only lists your own), remove them from groups at the IdP. A minted break-glass or SA token <strong>cannot be revoked</strong> (bound tokens): it expires (1 h for break-glass); until then watch <code>BreakGlassUsed</code>/<code>ArgoCDDirectMutation</code> and, for an Argo CD SA token, restart the controller pods so the projected token rotates and remove the actor&#39;s ability to mint again.</li>
+<li><strong>Recover</strong>: &quot;Restore Argo CD&quot; below, or re-sync the affected Application from Git.</li>
+<li><strong>Post-mortem</strong> within 5 working days: timeline from the audit log, which layer failed or worked, actions.</li>
+</ol>
+<h3>Guardrail tampering (<code>GuardrailPolicyModified</code>, <code>AuditProfileChanged</code>, <code>AuditForwarderChanged</code>, <code>PrivilegedRBACChange</code>)</h3>
+<ol>
+<li><code>oc get application guardrails -n openshift-gitops -o jsonpath=&#39;{.status.sync.status} {.status.health.status}&#39;</code> – if <code>OutOfSync</code>, Argo CD will heal within 3 min; force it: <code>argocd app sync guardrails</code> (or the UI).</li>
+<li>Diff live vs Git: <code>argocd app diff guardrails</code>.</li>
+<li>Attribute with <code>scripts/audit-query.sh &lt;object&gt;</code>; a write by anyone but the Argo CD SA is a security incident unless it is a documented break-glass.</li>
+<li>Verify the control is back: <code>oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server</code> must be denied.</li>
+</ol>
+<h3>Detection pipeline (<code>AuditLogIngestionStalled</code>, <code>LokiRulerDown</code>, <code>AuditForwarderNotReady</code>)</h3>
+<pre><code class="language-bash">oc get clusterlogforwarder audit-forwarder -n openshift-logging -o yaml | yq &#39;.status.conditions&#39;
+oc get pods -n openshift-logging -l app.kubernetes.io/component=collector -o wide
+oc logs -n openshift-logging ds/audit-forwarder --tail=100 | grep -iE &#39;error|warn&#39;
+oc get lokistack logging-loki -n openshift-logging -o yaml | yq &#39;.status&#39;
+oc get pods -n openshift-logging -l app.kubernetes.io/component=ruler
+</code></pre>
+<p>While the pipeline is down, the metrics alerts still cover Argo CD availability; raise the incident priority and monitor the SIEM directly.</p>
+<h2>Break-glass</h2>
+<p>Use when approvers are unreachable (IdP outage, disaster), or when a <strong>Tier-B</strong> object (namespace, CRD, OLM object, Secret, ServiceAccount) must be deleted out of band. Two custodians (<code>breakglass-custodians</code> group), one incident ticket, one hour.</p>
+<ol>
+<li>Custodian A opens the incident and posts in the security channel: object, reason, custodians&#39; names.</li>
+<li>Custodian A (a member of <code>breakglass-custodians</code>, the only role with <code>create</code> on <code>serviceaccounts/token</code> for this SA) mints the token with custodian B watching; <code>PrivilegedTokenMinted</code> fires and must match the incident:<pre><code class="language-bash">oc create token breakglass -n guardrails-system --duration=1h &gt; /dev/shm/bg.token
+</code></pre>
+</li>
+<li>Perform the minimal action with <code>oc --token=$(cat /dev/shm/bg.token) …</code>. Every request raises <code>BreakGlassUsed</code>; that is the audit trail.</li>
+<li>Shred the token file; the token expires in 1 h regardless. Post the exact commands in the incident.</li>
+<li>Post-mortem: why were approvers unreachable; fix that.</li>
+</ol>
+<p>If the <em>repository</em> needs an emergency merge, an org admin temporarily adds themselves as a bypass actor on the ruleset (GitHub audit log records it), merges with a second person reviewing live, and removes the bypass before closing the incident.</p>
+<h2>Restore Argo CD</h2>
+<p>Symptoms: <code>ArgoCDApplicationControllerMissing</code>, <code>ArgoCDServerMissing</code>, <code>GitOpsNamespaceTerminating</code>, <code>CriticalResourceDeleted</code> for <code>argocds</code>.</p>
+<ol>
+<li>Incident + attribution (above).</li>
+<li>Assess what is left:<pre><code class="language-bash">oc get ns openshift-gitops openshift-gitops-operator
+oc get csv -n openshift-gitops-operator
+oc get argocd -n openshift-gitops
+oc get application,appproject -n openshift-gitops
+oc get crd | grep argoproj
+</code></pre>
+</li>
+<li>Operator gone → reinstall from the cluster-config repo (Subscription in <code>openshift-gitops-operator</code>); wait <code>oc get csv -n openshift-gitops-operator -w</code> → Succeeded; the operator recreates the default <code>ArgoCD/openshift-gitops</code>.</li>
+<li>Instance/applications gone → <code>oc apply --server-side -k manifests/overlays/&lt;current-phase&gt;</code>; this restores the hardening patch, the <code>guardrails</code> AppProject/Application; then bootstrap your other app-of-apps from their repos.</li>
+<li>Credentials → <code>velero restore create argocd-secrets-$(date +%s) --from-backup &lt;latest gitops-6h&gt; --include-namespaces openshift-gitops --include-resources secrets</code> (or ESO re-sync).</li>
+<li>Verify: <code>scripts/verify-install.sh</code>; <code>argocd app list</code> shows all apps Synced/Healthy; <code>oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server</code> denied.</li>
+<li>Expected RTO: 10 min (instance only) – 30 min (operator + instance).</li>
+</ol>
+<h2>Git-driven deletion</h2>
+<p><code>GitOpsCriticalDeletionApplied</code> fired. Find the PR: <code>git log --oneline -S &#39;&lt;object name&gt;&#39; -- manifests/</code> (or the application repository). If a merged PR removed the object: expected, link it in the alert thread. If not: incident (see Respond to a red alert, classification <code>gitops=true</code> without PR).</p>
+<h2>Reaper</h2>
+<p><code>GuardrailReaperFailing</code>: <code>oc logs -n guardrails-system job/&lt;name&gt;</code>; typical causes: image pull (disconnected mirror), RBAC drift (self-heal fixes), a denied patch (policy V3 change). Approvals older than the TTL simply remain until fixed; nothing becomes <em>less</em> safe.</p>
+<p>Change the TTL: PR on <code>guardrailconfig-default.yaml</code> (<code>approvalTTL</code>).</p>
+<h2>Onboarding / offboarding an approver</h2>
+<p>IdP group change (JML process) → group sync → <code>PrivilegedRBACChange</code> alert confirms → the approver runs <code>scripts/approve-deletion.sh</code> on the quarterly test object (docs/12) as proof. Keep ≥ 4 approvers across ≥ 2 teams.</p>
+<h2>Post-mortem template</h2>
+<ul>
+<li>Summary, impact, detection time (alert timestamp − audit <code>requestReceivedTimestamp</code>), response time.</li>
+<li>Timeline from <code>scripts/audit-query.sh</code> output (paste the lines).</li>
+<li>Which layers held / failed (L1–L8 from docs/01).</li>
+<li>Residual-risk register updates (docs/01), actions with owners and dates.</li>
+</ul>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/09-runbooks.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

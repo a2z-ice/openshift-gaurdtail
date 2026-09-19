@@ -56,6 +56,7 @@ small,.muted{color:var(--muted)}
 </style>
 </head>
 <body>
+<a href="index.html" style="position:fixed;left:14px;top:10px;z-index:6;font-size:13px;border:1px solid var(--line);background:var(--code);border-radius:6px;padding:4px 10px">← Index</a>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button>
 <script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
 <div class="layout">

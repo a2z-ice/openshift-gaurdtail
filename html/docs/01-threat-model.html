@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01-threat-model · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>01 · Threat model and residual risk</h1>
+<h2>Assets</h2>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Why it is critical</th>
+<th>Failure impact</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OpenShift GitOps: <code>ArgoCD/openshift-gitops</code>, namespace, operator Subscription/CSV, <code>argoproj.io</code> CRDs, AppProjects, Applications, repo/cluster secrets</td>
+<td>Single control loop for every workload; deleting the CRDs cascades to every Application; deleting an Application with the cascade finalizer deletes the workloads it manages</td>
+<td>Platform-wide outage or silent config drift; hours to rebuild</td>
+</tr>
+<tr>
+<td>The guardrail objects themselves (<code>ValidatingAdmissionPolicy</code>/Binding, <code>GuardrailConfig</code>, <code>guardrails-*</code> RBAC, approver groups, reaper)</td>
+<td>If they go, everything else is one <code>oc delete</code> away</td>
+<td>Loss of the control</td>
+</tr>
+<tr>
+<td>Audit pipeline (<code>APIServer/cluster</code> audit profile, <code>ClusterLogForwarder</code>, <code>LokiStack</code>, <code>AlertingRule</code>s, <code>alertmanager-main</code>)</td>
+<td>Detection and forensics</td>
+<td>Blind spot; unattributable actions</td>
+</tr>
+<tr>
+<td>Backups (<code>DataProtectionApplication</code>, <code>Schedule</code>s, bucket)</td>
+<td>Last line of recovery</td>
+<td>Unrecoverable data loss</td>
+</tr>
+<tr>
+<td>Privileged identities (<code>cluster-admin</code> bindings, <code>platform-admins</code>, break-glass SA, <code>system:admin</code> kubeconfig, <code>kubeadmin</code>)</td>
+<td>Whoever holds them can do anything RBAC allows</td>
+<td>Complete compromise</td>
+</tr>
+</tbody></table>
+<h2>Actors and scenarios</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Scenario</th>
+<th>Likelihood</th>
+<th>Control(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>S1</td>
+<td>Admin runs <code>oc delete ns openshift-gitops</code> / <code>oc delete argocd ...</code> by mistake (wrong context, wrong tab)</td>
+<td>high</td>
+<td>VAP denies (L3); alert <code>CriticalResourceDeleteDenied</code> (L6)</td>
+</tr>
+<tr>
+<td>S2</td>
+<td>Admin deletes an Argo CD <code>Application</code> that still carries <code>resources-finalizer</code> → cascade deletes workloads</td>
+<td>high</td>
+<td>Finalizer removed / <code>preserveResourcesOnDeletion</code> (L2); Application labelled critical → VAP (L3)</td>
+</tr>
+<tr>
+<td>S3</td>
+<td>A PR removes a critical manifest from Git and Argo CD prunes it</td>
+<td>medium</td>
+<td><strong>This is the approved GitOps path</strong>: the 2-reviewer ruleset with code owners (L8) is the control; the deletion is applied by the exempt controller and alerted as <code>GitOpsCriticalDeletionApplied</code> for PR correlation (L6); CI invariants reject weakening PRs</td>
+</tr>
+<tr>
+<td>S4</td>
+<td>Compromised or malicious cluster-admin tries to delete / cripple Argo CD</td>
+<td>low, high impact</td>
+<td>VAP applies to <code>system:masters</code> (L3); forging approvals or impersonating the exempt Argo CD controller / break-glass → <code>ImpersonationUsed</code> / <code>PrivilegedIdentityImpersonated</code> P1, minting their tokens → <code>PrivilegedTokenMinted</code> P1 (L6); no standing cluster-admin for humans (L1)</td>
+</tr>
+<tr>
+<td>S5</td>
+<td>Attacker first disables the guardrail (delete binding, edit <code>GuardrailConfig</code>, set <code>validationActions: []</code>)</td>
+<td>low</td>
+<td>Self-protection set is GitOps-only in <strong>every phase</strong> (<code>-hardened</code> binding, L3+L4); RBAC scoped with <code>resourceNames</code>, no human may patch these beyond annotations (L1); Argo CD self-heal (L2); <code>GuardrailPolicyModified</code> P1 (L6)</td>
+</tr>
+<tr>
+<td>S6</td>
+<td>Attacker blinds detection first (downgrade audit profile, delete forwarder, edit Alertmanager)</td>
+<td>low</td>
+<td>All are critical (L3); <code>AuditProfileChanged</code>, <code>AuditForwarderChanged</code> (L6); metrics-based <code>AuditLogIngestionStalled</code>, <code>ArgoCD*Missing</code> fire from a <strong>separate</strong> pipeline (L6)</td>
+</tr>
+<tr>
+<td>S7</td>
+<td>Operator / controller bug deletes objects (GC after parent deletion, namespace controller, OLM uninstall)</td>
+<td>medium</td>
+<td>Controllers are not exempt: their deletes are denied, they retry, an alert fires; parents (namespace, CSV, CRD) are also protected so cascades cannot start</td>
+</tr>
+<tr>
+<td>S8</td>
+<td>Approver collusion (two approvers + executor conspire)</td>
+<td>very low</td>
+<td>Out of scope for a technical control; approvals and executor are three distinct, audited humans; membership recertified quarterly (docs/12)</td>
+</tr>
+<tr>
+<td>S9</td>
+<td>Node/etcd level access (<code>oc debug node</code>, SSH to control plane, <code>etcdctl</code>) bypasses admission entirely</td>
+<td>low</td>
+<td>Residual. <code>ControlPlaneNodeAccess</code> alert; no SSH keys on control plane (MachineConfig); etcd encryption; bastion + session recording</td>
+</tr>
+<tr>
+<td>S10</td>
+<td>Loss of the whole cluster / region</td>
+<td>low</td>
+<td>OADP to a different, object-locked bucket; Git is the source of truth; cold-start runbook</td>
+</tr>
+</tbody></table>
+<h2>Layered controls</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Control</th>
+<th>Prevents / detects</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>L1</td>
+<td>Identity: IdP groups, JIT cluster-admin, no <code>kubeadmin</code>, vaulted <code>system:admin</code> kubeconfig, dual-control break-glass</td>
+<td>S4, S8</td>
+</tr>
+<tr>
+<td>L2</td>
+<td>Argo CD native: no cascade finalizers, <code>selfHeal</code>, AppProject fencing, Argo CD RBAC (operators cannot delete/override apps or touch the guardrails project)</td>
+<td>S2, S5</td>
+</tr>
+<tr>
+<td>L3</td>
+<td>Admission: <code>guardrails-critical-delete</code> (two-person rule for out-of-band deletes), <code>guardrails-critical-label-control</code>, <code>guardrails-gitops-only-mutation</code> (+ <code>-hardened</code>), <code>guardrails-rbac-escalation-audit</code></td>
+<td>S1, S2, S4–S7</td>
+</tr>
+<tr>
+<td>L4</td>
+<td>Self-protection: policy objects critical, RBAC-locked, self-healed, alerted</td>
+<td>S5</td>
+</tr>
+<tr>
+<td>L5</td>
+<td>Audit: <code>WriteRequestBodies</code>, forwarded to SIEM + Loki, 90 d in-cluster, WORM buckets</td>
+<td>forensics for all</td>
+</tr>
+<tr>
+<td>L6</td>
+<td>Detection: 20 Loki rules on the audit stream + 15 metrics rules, two independent pipelines</td>
+<td>S1–S7, S9</td>
+</tr>
+<tr>
+<td>L7</td>
+<td>Notification: Alertmanager → email + Teams, no grouping delay, repeat until resolved</td>
+<td>time-to-respond</td>
+</tr>
+<tr>
+<td>L8</td>
+<td>Process: GitHub 2-reviewer ruleset, CODEOWNERS, signed commits, CI invariants, quarterly recertification and restore drills</td>
+<td>S3, S8</td>
+</tr>
+</tbody></table>
+<h2>What this design deliberately does <strong>not</strong> do</h2>
+<ul>
+<li><strong>It does not stop three colluding people.</strong> A two-person rule is the industry standard for irreversible operations (nuclear, finance, PKI); the third person (executor) makes it a three-person rule. Collusion is addressed by audit, recertification and segregation of duties, not by software.</li>
+<li><strong>It does not protect against control-plane node compromise.</strong> Anyone who can write to etcd or edit static pod manifests is outside the Kubernetes trust boundary. Keep that population at zero: no SSH keys on masters, <code>oc debug node</code> alerted and reserved for incidents, MachineConfig managed from Git.</li>
+<li><strong>It does not remove <code>cluster-admin</code>.</strong> It makes <code>cluster-admin</code> unable to delete critical resources alone and unable to disable the guardrail unnoticed. <code>cluster-admin</code> can still impersonate an approver; that is why impersonation is a P1 alert and human <code>cluster-admin</code> is time-boxed. If your IdP cannot do JIT membership, treat <code>platform-admins</code> membership as a quarterly-recertified, two-person-approved change (the group is critical, so it is).</li>
+<li><strong>It is not a substitute for backups.</strong> It lowers the probability of needing them.</li>
+</ul>
+<h2>Residual-risk register</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Risk</th>
+<th>Owner</th>
+<th>Compensating control</th>
+<th>Review</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>R1</td>
+<td>cluster-admin impersonates an approver (forged approval), the exempt break-glass SA or an Argo CD controller (one-command bypass), or mints their tokens</td>
+<td>Security</td>
+<td><code>ImpersonationUsed</code>, <code>PrivilegedIdentityImpersonated</code>, <code>PrivilegedTokenMinted</code> P1; JIT cluster-admin is a hard prerequisite; audit shows both identities so it is provable</td>
+<td>quarterly</td>
+</tr>
+<tr>
+<td>R2</td>
+<td>Node/etcd-level bypass</td>
+<td>Platform</td>
+<td>no SSH keys; <code>ControlPlaneNodeAccess</code> alert; session recording on bastion</td>
+<td>quarterly</td>
+</tr>
+<tr>
+<td>R3</td>
+<td>Whether a VAP may match <code>validatingadmissionpolicies</code>/<code>...bindings</code> on your exact build must be <strong>confirmed in phase 1</strong> (<code>scripts/test-guardrails.sh</code> case &quot;delete policy binding&quot;). If it cannot, deleting a binding is still RBAC-restricted to the Argo CD SA + break-glass, is self-healed by Argo CD within its sync interval, and raises <code>GuardrailPolicyModified</code> P1</td>
+<td>Platform</td>
+<td>RBAC + self-heal + alert</td>
+<td>phase 1 exit</td>
+</tr>
+<tr>
+<td>R4</td>
+<td>Approval TTL is enforced by the reaper CronJob, not by admission (CEL has no clock). A stale approval on a specific object could be used later for <strong>that object only</strong></td>
+<td>Platform</td>
+<td>reaper every 10 min, also drops future-dated entries; <code>GuardrailReaperFailing</code> alert; a change to the request is denied unless approvals are cleared with it</td>
+<td>quarterly</td>
+</tr>
+<tr>
+<td>R7</td>
+<td>The GitOps path is only as strong as the repository controls: a compromised GitHub account with two reviewers, or a compromised Argo CD controller token, can delete critical objects</td>
+<td>Security</td>
+<td>ruleset without bypass, signed commits, secret scanning, CI invariants; <code>GitOpsCriticalDeletionApplied</code> must always correlate with a merged PR; <code>PrivilegedTokenMinted</code>, <code>ControlPlaneNodeAccess</code> cover the controller identity; Argo CD RBAC denies override/create in the guardrails project</td>
+<td>quarterly</td>
+</tr>
+<tr>
+<td>R8</td>
+<td>Tier-B kinds (namespaces, CRDs, OLM objects, Secrets, ServiceAccounts) have no workflow path: an out-of-band deletion needs break-glass</td>
+<td>Platform</td>
+<td>deliberate: a patch on these is an escalation primitive; Git remains the normal path</td>
+<td>annual</td>
+</tr>
+<tr>
+<td>R5</td>
+<td>Alert delivery depends on SMTP relay and Teams Workflows availability</td>
+<td>Platform</td>
+<td>every guardrail alert is also routed to the default on-call receiver; Alertmanager <code>repeat_interval: 30m</code></td>
+<td>monthly synthetic alert</td>
+</tr>
+<tr>
+<td>R6</td>
+<td>Loki <code>json</code> field names depend on the Logging data model; a Logging major upgrade may rename them</td>
+<td>Platform</td>
+<td><code>AuditLogIngestionStalled</code> would not catch a rename; run <code>scripts/test-guardrails.sh</code> after every Logging operator upgrade</td>
+<td>per upgrade</td>
+</tr>
+</tbody></table>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a></p>
+</main>
+<footer>Generated from <code>docs/01-threat-model.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>
