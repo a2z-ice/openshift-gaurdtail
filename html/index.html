@@ -10,7 +10,7 @@
 </head>
 <body>
 <header class="site"><a class="brand" href="index.html">OpenShift Guardrails</a>
-<nav><a href="index.html">Index</a><a href="docs/18-the-story.html">Story</a><a href="study-guide.html">Study guide</a><a href="docs/15-implementation-guide.html">Implement</a><a href="docs/14-manual-test-guide.html">Test</a><a href="docs/16-production-readiness-review.html">Readiness review</a></nav>
+<nav><a href="index.html">Index</a><a href="docs/18-the-story.html">Story</a><a href="docs/19-deletion-approval-lifecycle.html">Approvals</a><a href="study-guide.html">Study guide</a><a href="docs/15-implementation-guide.html">Implement</a><a href="docs/14-manual-test-guide.html">Test</a><a href="docs/16-production-readiness-review.html">Readiness review</a></nav>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
 <main>
 <h1>OpenShift 4.21 Guardrails</h1>
@@ -18,10 +18,10 @@
 
 <div class="kpis">
 <div class="kpi"><b>8</b><span>defence layers, independent</span></div>
-<div class="kpi"><b>5</b><span>admission policies (7 bindings) in kube-apiserver</span></div>
-<div class="kpi"><b>34</b><span>alerts across two detection pipelines</span></div>
+<div class="kpi"><b>6</b><span>admission policies (8 bindings) in kube-apiserver</span></div>
+<div class="kpi"><b>41</b><span>alerts across two detection pipelines</span></div>
 <div class="kpi"><b>4</b><span>rollout phases, audit → enforce</span></div>
-<div class="kpi"><b>~70 + 45</b><span>automated + manual test cases</span></div>
+<div class="kpi"><b>76 + 50</b><span>automated + manual test cases</span></div>
 <div class="kpi"><b>59</b><span>independent audit findings resolved</span></div>
 </div>
 
@@ -38,7 +38,7 @@ A change merged through the repository ruleset (two reviewers, code owners, sign
 <tr><td>3</td><td>Admission policy</td><td>on-object approvals validated in CEL: request + 2 distinct approvers + executor ≠ approver; label control; GitOps-only mutation</td></tr>
 <tr><td>4</td><td>Self-protection</td><td>the policy's own objects are GitOps-only in every phase, self-healed by Argo CD, and any out-of-band write is a P1 alert</td></tr>
 <tr><td>5</td><td>Audit logging</td><td><code>WriteRequestBodies</code>, forwarded to the SIEM (record) and LokiStack (alerting), encrypted etcd, WORM buckets</td></tr>
-<tr><td>6</td><td>Detection</td><td>19 Loki rules on the audit stream + 15 metrics rules that keep working if the audit pipeline is blinded</td></tr>
+<tr><td>6</td><td>Detection</td><td>25 Loki rules on the audit stream + 16 metrics rules that keep working if the audit pipeline is blinded</td></tr>
 <tr><td>7</td><td>Notification</td><td>Alertmanager 0.29: email + Microsoft Teams (Workflows), no grouping delay, repeats until acknowledged, delivery health alerted</td></tr>
 <tr><td>8</td><td>Recovery</td><td>Git, OADP schedules to an object-locked bucket, nightly etcd snapshots, rehearsed restore and break-glass</td></tr>
 </table>
@@ -48,6 +48,7 @@ A change merged through the repository ruleset (two reviewers, code owners, sign
 <a href="docs/18-the-story.html"><b>The story: what this project solves, why, and how</b></a>. Part 1 (15 minutes) explains the problem, the value, the cost, the risks and the decisions for leaders who approve the work. Part 2 (60 minutes) is a guided tour for technical teams: every layer, every file, what it solves, how, and what each team has to do. Thirteen architecture and flow diagrams.</div>
 <div class="cards">
 <a class="card primary" href="docs/18-the-story.html"><span class="num">Understand</span><h3>The story</h3><p>For leaders and engineers alike: the night nobody wants, the two-road trust model, the eight layers, file-by-file responsibilities, rollout, roles and the decisions to approve.</p></a>
+<a class="card primary" href="docs/19-deletion-approval-lifecycle.html"><span class="num">Operate</span><h3>Deletion approval lifecycle</h3><p>How an accidental deletion is stopped, how approvers are notified by email and Teams, how the system counts approvals and remaining ones, and how long requests (24 h) and approvals (4 h) live. Architecture, state machine, responsible code, gaps fixed.</p></a>
 <a class="card primary" href="study-guide.html"><span class="num">Learn</span><h3>Study guide</h3><p>17 chapters from Kubernetes foundations to every corner case and the readiness review. For becoming the person who designs and defends this control.</p></a>
 <a class="card primary" href="docs/15-implementation-guide.html"><span class="num">Do</span><h3>Implementation guide</h3><p>Parts A to G: prepare, prerequisites, bootstrap on pre-prod, hand over to Argo CD, phase gates, production, operate. Tracking table included.</p></a>
 <a class="card primary" href="docs/14-manual-test-guide.html"><span class="num">Prove</span><h3>Manual test guide</h3><p>Every positive and negative scenario with the exact command and expected output, plus the sign-off table.</p></a>
@@ -71,6 +72,7 @@ A change merged through the repository ruleset (two reviewers, code owners, sign
 <a class="card" href="docs/11-testing-and-validation.html"><span class="num">11</span><h3>Testing and validation</h3><p>Static checks, the automated matrix, alert delivery tests, evidence to keep.</p></a>
 <a class="card" href="docs/12-operations-and-compliance.html"><span class="num">12</span><h3>Operations and compliance</h3><p>Recurring activities, KPIs, control mapping to ISO 27001, SOC 2, NIST 800-53, CIS, PCI DSS.</p></a>
 <a class="card" href="docs/17-impersonation-control.html"><span class="num">17</span><h3>Impersonation control</h3><p>Why <code>--as</code> now works only for reads, access reviews and dry-runs: RBAC without <code>userextras</code> plus authentication markers in admission.</p></a>
+<a class="card" href="docs/19-deletion-approval-lifecycle.html"><span class="num">19</span><h3>Deletion approval lifecycle</h3><p>Prevention, approver notifications and reminders, the on-object memory (request, requested-at, approvals), counting, lifetimes and the reaper; defects D1/D2 and gaps G1–G8 fixed.</p></a>
 <a class="card" href="docs/13-solution-justification.html"><span class="num">13</span><h3>Solution justification</h3><p>Concern-by-concern argument for a review board, alternatives rejected, what is proven and what is residual.</p></a>
 </div>
 

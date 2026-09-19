@@ -26,6 +26,7 @@
 - [docs/16-production-readiness-review.md](docs/16-production-readiness-review.md): independent audit findings, fixes, trust-model decision and the control-to-test traceability matrix
 - [docs/17-impersonation-control.md](docs/17-impersonation-control.md): impersonation restricted to reads, access reviews and dry-runs via RBAC (no userextras) + admission markers
 - [docs/18-the-story.md](docs/18-the-story.md): narrative overview for leaders (Part 1) and technical teams (Part 2), file-by-file responsibilities, diagrams
+- [docs/19-deletion-approval-lifecycle.md](docs/19-deletion-approval-lifecycle.md): deletion lifecycle: prevention, approver notifications, approval counting, request/approval lifetimes, responsible code, gaps fixed
 - [docs/13-solution-justification.md](docs/13-solution-justification.md): why the design is enterprise-grade, concern by concern
 - [docs/14-manual-test-guide.md](docs/14-manual-test-guide.md): manual tests with expected output for every scenario
 - [html/index.html](html/index.html): HTML portal: summary, trust model, navigation to every page

@@ -91,7 +91,7 @@ approvals_of() { oc -n "$NS" get cm "$1" -o go-template="{{with .metadata.annota
 mk_cm() { oc -n "$NS" create configmap "$1" --from-literal=a=b --dry-run=client -o yaml | oc apply -f - >/dev/null; }
 # full workflow on a scratch object (used for cleanup and the happy path); all steps are asserted
 workflow_delete() { # workflow_delete <cm>
-  expect allow "requester opens request on $1"      -- as requester -- -n "$NS" annotate configmap "$1" --overwrite "$PFX/delete-request=CHG-cleanup: $1" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-approvals-"
+  expect allow "requester opens request on $1"      -- as requester -- -n "$NS" annotate configmap "$1" --overwrite "$PFX/delete-request=CHG-cleanup: $1" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=$(ts)" "$PFX/delete-approvals-"
   expect allow "approver1 approves $1"              -- as approver1 -- -n "$NS" annotate configmap "$1" --overwrite "$PFX/delete-approvals=$APP1|$(ts)"
   expect allow "approver2 approves $1"              -- as approver2 -- -n "$NS" annotate configmap "$1" --overwrite "$PFX/delete-approvals=$(approvals_of "$1"),$APP2|$(ts)"
   expect allow "executor deletes $1 with 2 approvals" -- as executor -- -n "$NS" delete configmap "$1"
@@ -162,18 +162,20 @@ expect deny        "cluster-admin patches binding validationActions"            
 expect deny        "cluster-admin adds self to exemptUsers"                       -- as admin     -- patch guardrailconfig default --type merge -p '{"spec":{"exemptUsers":["system:apiserver","me@example.com"]}}' --dry-run=server
 expect deny        "approver adds self to platform-admins group"                  -- as approver1 -- patch group platform-admins --type merge -p "{\"users\":[\"$APP1\"]}" --dry-run=server
 expect deny        "approver changes reaper CronJob serviceAccount"               -- as approver1 -- -n guardrails-system patch cronjob approval-reaper --type merge -p '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"serviceAccountName":"breakglass"}}}}}}' --dry-run=server
-expect allow       "approver may still annotate a self-protection object"         -- as approver1 -- annotate guardrailconfig default "$PFX/delete-request=CHG-test: rehearsal" "$PFX/delete-requested-by=$APP1" --overwrite --dry-run=server
+expect allow       "approver may still annotate a self-protection object"         -- as approver1 -- annotate guardrailconfig default "$PFX/delete-request=CHG-test: rehearsal" "$PFX/delete-requested-by=$APP1" "$PFX/delete-requested-at=$(ts)" --overwrite --dry-run=server
 expect "$DENY_MUT" "human edits spec of a critical object (gitops-only, phase 4 denies)" -- as admin -- -n "$NS" patch configmap victim --type merge -p '{"data":{"a":"hand-edited"}}' --dry-run=server
 
 echo "== 5. forged approvals are rejected"
 expect "$DENY_DEL" "admin writes 2 approvals directly"                            -- as admin     -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts),$APP2|$(ts)"
-expect "$DENY_DEL" "requester sets requested-by to someone else"                  -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: test" "$PFX/delete-requested-by=$APP1"
-expect "$DENY_DEL" "developer (no requester group) opens a request"               -- as developer -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=$DEV_USER"
+expect "$DENY_DEL" "requester sets requested-by to someone else"                  -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: test" "$PFX/delete-requested-by=$APP1" "$PFX/delete-requested-at=$(ts)"
+expect "$DENY_DEL" "developer (no requester group) opens a request"               -- as developer -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=$DEV_USER" "$PFX/delete-requested-at=$(ts)"
+expect "$DENY_DEL" "requester opens a request WITHOUT delete-requested-at"          -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=$REQ_USER"
+expect "$DENY_DEL" "requester opens a request with a malformed delete-requested-at"  -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=yesterday"
 expect "$DENY_DEL" "approver approves before any request exists"                  -- as approver1 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts)"
-oc -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-approvals-" >/dev/null 2>&1 || true   # phase 1/2: undo what succeeded
+oc -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-requested-at-" "$PFX/delete-approvals-" >/dev/null 2>&1 || true   # phase 1/2: undo what succeeded
 
 echo "== 6. the happy path, with every negative branch"
-expect allow       "requester opens a request"                                    -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: guardrail test" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-approvals-"
+expect allow       "requester opens a request"                                    -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: guardrail test" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=$(ts)" "$PFX/delete-approvals-"
 expect "$DENY_DEL" "requester approves own request"                               -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$REQ_USER|$(ts)"
 expect "$DENY_DEL" "approver1 approves under a different name"                    -- as approver1 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP2|$(ts)"
 expect "$DENY_DEL" "approver1 malformed entry (no timestamp)"                     -- as approver1 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1"
@@ -186,25 +188,32 @@ expect "$DENY_DEL" "approver2 replaces the list (drops approver1)"              
 if [[ "$DENY_DEL" == "allow" ]]; then oc -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts)" >/dev/null 2>&1; fi   # phase 1/2 repair
 expect allow       "approver2 appends"                                            -- as approver2 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$(approvals_of victim),$APP2|$(ts)"
 expect "$DENY_DEL" "approver1 (an approver, also executor role) executes"         -- as approver1-executor -- -n "$NS" delete configmap victim
+expect "$DENY_DEL" "requester refreshes delete-requested-at to extend the request (keeps approvals)" -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-requested-at=$(ts)"
 expect "$DENY_DEL" "requester changes the reason after approvals"                 -- as requester -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-request=CHG1: changed"
 expect allow       "executor deletes with 2 approvals -> CriticalResourceDeleted" -- as executor  -- -n "$NS" delete configmap victim
 
 echo "== 7. cancel path"
 mk_cm victim2; as approver1 -- -n "$NS" label configmap victim2 "$PFX/critical=true" --overwrite >/dev/null
-expect allow       "requester opens request on victim2"                           -- as requester -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request=CHG2: cancel test" "$PFX/delete-requested-by=$REQ_USER"
+expect allow       "requester opens request on victim2"                           -- as requester -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request=CHG2: cancel test" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=$(ts)"
 expect allow       "approver1 approves victim2"                                   -- as approver1 -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$APP1|$(ts)"
-expect allow       "third party cancels (clears all guardrail annotations)"       -- as approver2 -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-approvals-"
+expect allow       "third party cancels (clears all guardrail annotations)"       -- as approver2 -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-requested-at-" "$PFX/delete-approvals-"
 expect "$DENY_DEL" "delete after cancel"                                          -- as executor  -- -n "$NS" delete configmap victim2
 
 echo "== 8. reaper: removes expired/future entries, cannot add"
-expect allow       "requester opens request on victim2 (reaper test)"             -- as requester -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request=CHG3: reaper" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-approvals-"
+expect allow       "requester opens request on victim2 (reaper test)"             -- as requester -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request=CHG3: reaper" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=$(ts)" "$PFX/delete-approvals-"
 expect allow       "approver1 approves with an EXPIRED timestamp"                 -- as approver1 -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$APP1|2000-01-01T00:00:00Z"
 expect allow       "approver2 approves with a FUTURE timestamp"                   -- as approver2 -- -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-approvals=$(approvals_of victim2),$APP2|2099-01-01T00:00:00Z"
+mk_cm victim3; as approver1 -- -n "$NS" label configmap victim3 "$PFX/critical=true" --overwrite >/dev/null
+expect allow       "requester opens a request dated 2000-01-01 on victim3 (request-expiry test)" -- as requester -- -n "$NS" annotate configmap victim3 --overwrite "$PFX/delete-request=CHG4: stale" "$PFX/delete-requested-by=$REQ_USER" "$PFX/delete-requested-at=2000-01-01T00:00:00Z"
+expect allow       "approver1 approves victim3"                                   -- as approver1 -- -n "$NS" annotate configmap victim3 --overwrite "$PFX/delete-approvals=$APP1|$(ts)"
 JOB="reaper-test-$(date +%s)"
 if oc -n guardrails-system create job "$JOB" --from=cronjob/approval-reaper >/dev/null 2>&1 && oc -n guardrails-system wait --for=condition=complete "job/$JOB" --timeout=180s >/dev/null 2>&1; then
   LEFT="$(approvals_of victim2)"
   if [[ -z "$LEFT" ]]; then PASS=$((PASS+1)); printf '  \033[1;32mPASS\033[0m %-72s\n' "reaper removed the expired and the future-dated approval"; else FAIL=$((FAIL+1)); printf '  \033[1;31mFAIL\033[0m %-72s (left: %s)\n' "reaper removed expired/future approvals" "$LEFT"; fi
   record "reaper run" "empty" "$LEFT" 0 "$(oc -n guardrails-system logs "job/$JOB" 2>&1)"
+  STALE="$(oc -n "$NS" get cm victim3 -o go-template="{{with .metadata.annotations}}{{with index . \"$PFX/delete-request\"}}{{.}}{{end}}{{with index . \"$PFX/delete-approvals\"}}{{.}}{{end}}{{end}}")"
+  if [[ -z "$STALE" ]]; then PASS=$((PASS+1)); printf '  \033[1;32mPASS\033[0m %-72s\n' "reaper withdrew the request older than requestTTL (and its approval)"; else FAIL=$((FAIL+1)); printf '  \033[1;31mFAIL\033[0m %-72s (left: %s)\n' "reaper withdrew the stale request" "$STALE"; fi
+  record "reaper request expiry" "empty" "$STALE" 0 ""
   oc -n guardrails-system delete job "$JOB" >/dev/null 2>&1 || true
 else
   SKIP=$((SKIP+1)); printf '  \033[1;33mSKIP\033[0m %s\n' "reaper job could not be started/completed (check GuardrailReaperFailing)"
@@ -243,8 +252,9 @@ echo "== 11. rbac-escalation policy warns (never blocks) and stamps the audit ev
 expect_warn "creating a cluster-admin binding is FLAGGED" "FLAGGED FOR AUDIT" -- as admin -- create clusterrolebinding guardrails-test-escalation --clusterrole=cluster-admin --user=nobody@example.com --dry-run=server
 
 echo "== 12. cleanup through the workflow (proves the namespace is not left Terminating)"
-oc -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-approvals-" >/dev/null 2>&1 || true
+oc -n "$NS" annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-requested-at-" "$PFX/delete-approvals-" >/dev/null 2>&1 || true
 workflow_delete victim2
+workflow_delete victim3
 if [[ "$(oc -n "$NS" get cm tenant -o jsonpath="{.metadata.labels.$(echo "$PFX" | sed 's/\./\\./g')/critical}" 2>/dev/null)" == "true" ]]; then workflow_delete tenant; fi
 oc -n "$NS" delete configmap precreated gitmanaged --ignore-not-found >/dev/null 2>&1 || true
 oc delete ns "$NS" --wait=false >/dev/null 2>&1 || true
@@ -252,5 +262,6 @@ sleep 5; PH="$(oc get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo
 echo "namespace $NS: ${PH}"
 
 echo; echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP  (evidence: $LOG)"
+echo "Approvers channel (docs/19): CriticalDeletionRequested, CriticalDeletionApproved (1 of 2, then FULLY APPROVED), CriticalDeletionApprovalsExpired + CriticalDeletionRequestClosed (request-expired) for victim2/victim3, CriticalDeletionRequestClosed (cancelled, executed)."
 echo "Now confirm delivery: CriticalResourceDeleted for configmap $NS/victim (email+Teams), GitOpsCriticalDeletionApplied for $NS/gitmanaged (Teams), CriticalResourceDeleteDenied (phase>=3) or CriticalDeleteWouldBeDenied (phase 1/2), PrivilegedRBACChange, ImpersonationUsed + PrivilegedIdentityImpersonated + ImpersonatedWriteDenied (impersonation mode)."
 [[ $FAIL -eq 0 ]]

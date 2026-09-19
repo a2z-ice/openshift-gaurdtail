@@ -55,5 +55,6 @@ spec:
   # sessions carry neither, because no human role may impersonate userextras.
   humanAuthExtraKey: scopes.authorization.openshift.io
   requireBoundTokenForPrivileged: true
-  approvalTTL: 4h
+  approvalTTL: 4h        # each approval is valid this long (reaper removes older entries)
+  requestTTL: 24h        # an open request is withdrawn this long after delete-requested-at (reaper); >= approvalTTL
   runbookURL: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md

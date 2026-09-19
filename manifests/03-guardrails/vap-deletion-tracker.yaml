@@ -1,0 +1,229 @@
+# ---------------------------------------------------------------------------
+# ValidatingAdmissionPolicy: guardrails-deletion-tracker
+#
+# Purpose : the MEMORY and NOTIFICATION source of the deletion workflow. It never denies anything
+#           (no validations, failurePolicy Ignore). For every successful or attempted change to the
+#           guardrails.example.com/delete-* annotations of a critical object, and for the final DELETE,
+#           it stamps one audit annotation that describes the resulting state of the request:
+#
+#   annotations["guardrails-deletion-tracker/state"] =
+#     event=approved open=1 ready=0 have=1 need=2 remaining=1 requested_by=alice requested_at=2026-09-19T08:00:00Z
+#     request_expires=2026-09-20T08:00:00Z first_approval_expires=2026-09-19T12:05:00Z actor=bob approvers="bob" req="CHG1: reason"
+#
+#   events: requested | approved | expired (reaper removed approvals) | approvals-cleared | cancelled |
+#           request-expired (reaper withdrew the request) | executed (DELETE with a request present)
+#
+#           Loki AlertingRules (manifests/05-alerting, group guardrails.approvals) turn these into approver
+#           notifications (email + Teams), progress "have of need, remaining", reminders while pending and
+#           "fully approved, awaiting execution". docs/19 explains the lifecycle.
+#
+# Why a separate policy: timestamp arithmetic in CEL can error on unexpected input. Here an error only
+#           drops the annotation (failurePolicy Ignore); it can never block a deletion or an approval.
+#           The enforcing rules stay in guardrails-critical-delete (failurePolicy Fail).
+# Keep in sync: variables.nameCritical is a verbatim copy of guardrails-critical-delete (CI checks this).
+# Phase   : 1 (Audit in every phase; overlays do not patch this binding)
+# Rollback: oc delete validatingadmissionpolicybinding guardrails-deletion-tracker (needs the workflow or Git: it is critical by name)
+# ---------------------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: guardrails-deletion-tracker
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  failurePolicy: Ignore
+  paramKind:
+    apiVersion: guardrails.example.com/v1alpha1
+    kind: GuardrailConfig
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["namespaces", "secrets", "configmaps", "serviceaccounts"]
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["argocds", "applications", "applicationsets", "appprojects"]
+      - apiGroups: ["operators.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["subscriptions", "clusterserviceversions", "operatorgroups"]
+      - apiGroups: ["olm.operatorframework.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterextensions"]
+      - apiGroups: ["apiextensions.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["customresourcedefinitions"]
+      - apiGroups: ["guardrails.example.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["guardrailconfigs"]
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings", "validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - apiGroups: ["user.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["groups"]
+      - apiGroups: ["config.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["apiservers", "oauths"]
+      - apiGroups: ["loki.grafana.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["lokistacks", "alertingrules", "rulerconfigs"]
+      - apiGroups: ["observability.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["clusterlogforwarders"]
+      - apiGroups: ["monitoring.coreos.com"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["prometheusrules", "alertmanagerconfigs"]
+      - apiGroups: ["velero.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["schedules", "backupstoragelocations"]
+      - apiGroups: ["oadp.openshift.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["dataprotectionapplications"]
+      - apiGroups: ["batch"]
+        apiVersions: ["*"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["cronjobs"]
+  matchConditions:
+    # cheap pre-filter: only objects that carry (or carried) a guardrail deletion annotation
+    - name: has-deletion-annotations
+      expression: >-
+        (has(oldObject.metadata.annotations) && oldObject.metadata.annotations.exists(k, k.startsWith('guardrails.example.com/delete-')))
+        || (request.operation == 'UPDATE' && has(object.metadata.annotations)
+            && object.metadata.annotations.exists(k, k.startsWith('guardrails.example.com/delete-')))
+  variables:
+    # ---- the state AFTER the request (UPDATE: object; DELETE: the object as it was when deleted)
+    - name: oldAnn
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: ann
+      expression: >-
+        request.operation == 'UPDATE'
+        ? (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        : variables.oldAnn
+    - name: oldLabels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: newLabels
+      expression: "request.operation == 'UPDATE' && has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: labelCritical
+      expression: >-
+        ('guardrails.example.com/critical' in variables.oldLabels && variables.oldLabels['guardrails.example.com/critical'] == 'true')
+        || ('guardrails.example.com/critical' in variables.newLabels && variables.newLabels['guardrails.example.com/critical'] == 'true')
+    - name: nameCritical
+      expression: >-
+        (request.resource.group == '' && request.resource.resource == 'namespaces'
+          && oldObject.metadata.name in ['openshift-gitops', 'openshift-gitops-operator', 'guardrails-system', 'openshift-logging', 'openshift-adp'])
+        || (request.resource.group == 'apiextensions.k8s.io'
+          && oldObject.spec.group in ['argoproj.io', 'guardrails.example.com', 'loki.grafana.com', 'observability.openshift.io', 'velero.io', 'oadp.openshift.io'])
+        || (request.resource.group == 'admissionregistration.k8s.io' && oldObject.metadata.name.startsWith('guardrails-')) || (request.resource.group == 'guardrails.example.com') || (request.resource.group == 'user.openshift.io'
+          && oldObject.metadata.name in ['platform-admins', 'gitops-deletion-approvers', 'gitops-deletion-requesters'])
+        || (request.resource.group == 'rbac.authorization.k8s.io' && oldObject.metadata.name.startsWith('guardrails-')) || (request.resource.group == 'config.openshift.io') || (request.resource.group == 'argoproj.io' && request.resource.resource == 'argocds' && has(request.namespace) && request.namespace == 'openshift-gitops') || (request.resource.group == 'operators.coreos.com' && has(request.namespace) && request.namespace == 'openshift-gitops-operator') || (request.resource.group == 'olm.operatorframework.io' && oldObject.metadata.name.contains('gitops'))
+    - name: isCritical
+      expression: "variables.labelCritical || variables.nameCritical"
+    - name: req
+      expression: "'guardrails.example.com/delete-request' in variables.ann ? variables.ann['guardrails.example.com/delete-request'] : ''"
+    - name: reqBy
+      expression: "'guardrails.example.com/delete-requested-by' in variables.ann ? variables.ann['guardrails.example.com/delete-requested-by'] : ''"
+    - name: reqAt
+      expression: "'guardrails.example.com/delete-requested-at' in variables.ann ? variables.ann['guardrails.example.com/delete-requested-at'] : ''"
+    - name: apprRaw
+      expression: "'guardrails.example.com/delete-approvals' in variables.ann ? variables.ann['guardrails.example.com/delete-approvals'] : ''"
+    - name: oldReq
+      expression: "'guardrails.example.com/delete-request' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-request'] : ''"
+    - name: oldReqBy
+      expression: "'guardrails.example.com/delete-requested-by' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-requested-by'] : ''"
+    - name: oldReqAt
+      expression: "'guardrails.example.com/delete-requested-at' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-requested-at'] : ''"
+    - name: oldApprRaw
+      expression: "'guardrails.example.com/delete-approvals' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-approvals'] : ''"
+    # ---- approvals: only well-formed entries count (the enforcing policy only ever admits well-formed ones)
+    - name: approvals
+      expression: "variables.apprRaw == '' ? [] : variables.apprRaw.split(',').filter(e, e.matches('^[^|,]+[|][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'))"
+    - name: oldApprovalCount
+      expression: "variables.oldApprRaw == '' ? 0 : variables.oldApprRaw.split(',').size()"
+    - name: approvers
+      expression: "variables.approvals.map(e, e.split('|')[0])"
+    - name: have
+      expression: "variables.approvers.filter(u, u != variables.reqBy).size()"
+    - name: need
+      expression: "int(params.spec.minApprovers)"
+    - name: open
+      expression: "variables.req != '' && variables.reqBy != ''"
+    - name: remaining
+      expression: "variables.open && variables.need > variables.have ? variables.need - variables.have : 0"
+    - name: ready
+      expression: "variables.open && variables.remaining == 0"
+    - name: isReaper
+      expression: "request.userInfo.username in params.spec.reaperUsers"
+    # ---- expiry times, computed only from well-formed timestamps (anything else prints "unknown")
+    - name: requestTtl
+      expression: "has(params.spec.requestTTL) ? params.spec.requestTTL : '24h'"
+    - name: requestExpires
+      expression: >-
+        variables.reqAt.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
+        ? string(timestamp(variables.reqAt) + duration(variables.requestTtl)) : 'unknown'
+    - name: firstApprovalExpires
+      expression: >-
+        variables.approvals.size() == 0 ? 'none'
+        : string(timestamp(variables.approvals.map(e, e.split('|')[1]).min()) + duration(params.spec.approvalTTL))
+    # ---- what just happened
+    - name: requestChanged
+      expression: "variables.req != variables.oldReq || variables.reqBy != variables.oldReqBy || variables.reqAt != variables.oldReqAt"
+    - name: event
+      expression: >-
+        request.operation == 'DELETE' ? (variables.oldReq != '' ? 'executed' : '')
+        : variables.requestChanged && variables.open ? 'requested'
+        : variables.requestChanged && !variables.open && variables.oldReq != '' ? (variables.isReaper ? 'request-expired' : 'cancelled')
+        : variables.apprRaw == variables.oldApprRaw ? ''
+        : variables.approvals.size() > variables.oldApprovalCount ? 'approved'
+        : variables.isReaper ? 'expired'
+        : 'approvals-cleared'
+  auditAnnotations:
+    - key: state
+      valueExpression: >-
+        !variables.isCritical || variables.event == '' ? null
+        : 'event=' + variables.event
+          + ' open=' + (variables.open ? '1' : '0')
+          + ' ready=' + (variables.ready ? '1' : '0')
+          + ' have=' + string(variables.have)
+          + ' need=' + string(variables.need)
+          + ' remaining=' + string(variables.remaining)
+          + ' requested_by=' + (variables.reqBy != '' ? variables.reqBy : variables.oldReqBy)
+          + ' requested_at=' + (variables.reqAt != '' ? variables.reqAt : 'none')
+          + ' request_expires=' + variables.requestExpires
+          + ' first_approval_expires=' + variables.firstApprovalExpires
+          + ' actor=' + request.userInfo.username
+          + ' approvers="' + variables.approvers.join('|') + '"'
+          + ' req="' + (variables.req != '' ? variables.req : variables.oldReq).replace('"', "'").replace('\\', '/') + '"'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: guardrails-deletion-tracker
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  policyName: guardrails-deletion-tracker
+  paramRef:
+    name: default
+    parameterNotFoundAction: Allow
+  # Never denies: the policy has no validations. Audit is the only meaningful action; identical in every phase.
+  validationActions: ["Audit"]

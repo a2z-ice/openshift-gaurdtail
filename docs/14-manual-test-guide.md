@@ -178,7 +178,7 @@ $ as-a1 patch group platform-admins --type merge -p '{"users":["a1@example.com"]
 → Error from server (Forbidden): ... binding 'guardrails-gitops-only-mutation-hardened' denied request ...
 $ as-a1 -n guardrails-system patch cronjob approval-reaper --type merge -p '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"serviceAccountName":"breakglass"}}}}}}' --dry-run=server
 → Error from server (Forbidden): ... binding 'guardrails-gitops-only-mutation-hardened' denied request ...
-$ as-a1 annotate guardrailconfig default $PFX/delete-request="CHG-x: rehearsal" $PFX/delete-requested-by=a1@example.com --overwrite --dry-run=server
+$ as-a1 annotate guardrailconfig default $PFX/delete-request="CHG-x: rehearsal" $PFX/delete-requested-by=a1@example.com $PFX/delete-requested-at=$(ts) --overwrite --dry-run=server
 → guardrailconfig.guardrails.example.com/default annotated (server dry run)            (approval annotations remain allowed)
 ```
 ```bash
@@ -240,13 +240,13 @@ $ as-admin -n $NS annotate configmap victim --overwrite "$PFX/delete-approvals=a
 
 **T4.2 – request opened in someone else's name.**
 ```bash
-$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: test" "$PFX/delete-requested-by=a1@example.com"
+$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: test" "$PFX/delete-requested-by=a1@example.com" "$PFX/delete-requested-at=$(ts)"
 → Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change by req@example.com. delete-requested-by must equal your username, you must be in gitops-deletion-requesters,gitops-operators,gitops-deletion-approvers, delete-request must be non-empty, approvals must be empty when the request changes, and nothing else may change.
 ```
 
 **T4.3 – request by someone outside the requester/approver groups** (use any ordinary user, e.g. `dev@example.com` with `patch` rights via a test RoleBinding, or skip if none).
 ```bash
-$ KUBECONFIG=~/.kube/dev.kubeconfig oc -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=dev@example.com"
+$ KUBECONFIG=~/.kube/dev.kubeconfig oc -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=dev@example.com" "$PFX/delete-requested-at=$(ts)"
 → Error from server (Forbidden): ... invalid deletion request change by dev@example.com ...   (or an RBAC Forbidden if the user has no patch rights: also a pass)
 ```
 
@@ -258,13 +258,14 @@ $ as-a1 -n $NS annotate configmap victim --overwrite "$PFX/delete-approvals=a1@e
 
 **T4.5 – a valid request (positive).**
 ```bash
-$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: guardrail test" "$PFX/delete-requested-by=req@example.com"
+$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: guardrail test" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=$(ts)"
 → configmap/victim annotated
 $ state victim
 → guardrails.example.com/delete-request=CHG1: guardrail test
   guardrails.example.com/delete-requested-by=req@example.com
+  guardrails.example.com/delete-requested-at=2026-09-19T08:00:00Z
 ```
-Teams: `CriticalDeletionApprovalRecorded` (info, batched up to 1 min).
+Teams: `CriticalDeletionApprovalRecorded` (info, platform channel, batched up to 1 min) and `CriticalDeletionRequested` in the **approvers'** channel and mailbox (T6.5).
 
 **T4.6 – requester approves own request.**
 ```bash
@@ -343,6 +344,22 @@ $ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1:
 → Error from server (Forbidden): ... invalid deletion request change by req@example.com ... approvals must be empty when the request changes ...
 ```
 
+**T4.17 – a request without, or with a malformed, `delete-requested-at` is rejected.**
+```bash
+$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=req@example.com"
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change by req@example.com ... delete-requested-at must be an RFC3339 UTC time ...
+$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-request=CHG1: x" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=yesterday"
+→ Error from server (Forbidden): ... same message
+```
+
+**T4.18 – a request cannot be kept alive by refreshing its time while approvals exist.**
+```bash
+# after T4.10 (one approval present)
+$ as-req -n $NS annotate configmap victim --overwrite "$PFX/delete-requested-at=$(ts)"
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change ... approvals must be empty when the request changes ...
+```
+(Opening the request again with `request-deletion.sh` is allowed: it clears the approvals in the same write.)
+
 ## 5. The happy path ★
 
 **T5.1 – executor deletes with two approvals.**
@@ -383,9 +400,9 @@ Negative checks built into the scripts: `approve-deletion.sh` as `req` → `You 
 **T6.1 – cancel clears everything; delete after cancel is denied.**
 ```bash
 $ as-admin -n $NS create configmap victim2 --from-literal=a=b && as-admin -n $NS label configmap victim2 $PFX/critical=true
-$ as-req -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request=CHG3: cancel test" "$PFX/delete-requested-by=req@example.com"
+$ as-req -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request=CHG3: cancel test" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=$(ts)"
 $ as-a1  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-approvals=a1@example.com|$(ts)"
-$ as-a2  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-approvals-"
+$ as-a2  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request-" "$PFX/delete-requested-by-" "$PFX/delete-requested-at-" "$PFX/delete-approvals-"
 → configmap/victim2 annotated              (anyone with patch rights may cancel; cancelling never makes deletion easier)
 $ as-req -n $NS delete configmap victim2
 → Error from server (Forbidden): ... GUARDRAIL DENIED: ... (found 0, requested-by=, ...)
@@ -393,7 +410,7 @@ $ as-req -n $NS delete configmap victim2
 
 **T6.2 – the reaper removes expired AND future-dated approvals and cannot add any.**
 ```bash
-$ as-req -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request=CHG4: reaper" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-approvals-"
+$ as-req -n $NS annotate configmap victim2 --overwrite "$PFX/delete-request=CHG4: reaper" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=$(ts)" "$PFX/delete-approvals-"
 $ as-a1  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-approvals=a1@example.com|2000-01-01T00:00:00Z"       # expired
 → configmap/victim2 annotated
 $ as-a2  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-approvals=$(approvals victim2),a2@example.com|2099-01-01T00:00:00Z"   # future-dated
@@ -401,10 +418,11 @@ $ as-a2  -n $NS annotate configmap victim2 --overwrite "$PFX/delete-approvals=$(
 $ as-admin -n guardrails-system create job reaper-manual --from=cronjob/approval-reaper
 $ as-admin -n guardrails-system wait --for=condition=complete job/reaper-manual --timeout=120s
 $ as-admin -n guardrails-system logs job/reaper-manual
-→ reaper start ttl=4h (14400s) now=...
+→ reaper start approvalTTL=4h requestTTL=24h now=...
   expire configmaps guardrails-test/victim2 approver=a1@example.com at=2000-01-01T00:00:00Z (ttl or future/invalid timestamp)
   expire configmaps guardrails-test/victim2 approver=a2@example.com at=2099-01-01T00:00:00Z (ttl or future/invalid timestamp)
   configmap/victim2 annotated
+  pending configmaps guardrails-test/victim2 requested_at=... approvals=<none>
   reaper done
 $ state victim2 | grep approvals
 → (no output: both entries removed)
@@ -413,6 +431,45 @@ $ as-admin --as=system:serviceaccount:guardrails-system:approval-reaper -n $NS a
 $ as-admin -n guardrails-system delete job reaper-manual
 ```
 (The `--as` in the last step raises `ImpersonationUsed`; expected during testing.)
+
+**T6.3 – the reaper withdraws a request older than `requestTTL` (and its approvals).**
+```bash
+$ as-admin -n $NS create configmap victim3 --from-literal=a=b && as-a1 -n $NS label configmap victim3 $PFX/critical=true
+$ as-req -n $NS annotate configmap victim3 --overwrite "$PFX/delete-request=CHG5: stale" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=2000-01-01T00:00:00Z"
+$ as-a1  -n $NS annotate configmap victim3 --overwrite "$PFX/delete-approvals=a1@example.com|$(ts)"
+$ as-admin -n guardrails-system create job reaper-manual2 --from=cronjob/approval-reaper && as-admin -n guardrails-system wait --for=condition=complete job/reaper-manual2 --timeout=120s
+$ as-admin -n guardrails-system logs job/reaper-manual2 | grep victim3
+→ withdraw configmaps guardrails-test/victim3 requested_at=2000-01-01T00:00:00Z (requestTTL exceeded, undated, invalid or future-dated)
+$ state victim3
+→ (no output: request, requested-by, requested-at and approvals all removed)
+```
+Approvers' channel: `CriticalDeletionRequestClosed` with `event=request-expired`.
+
+**T6.4 – progress and memory are visible.**
+```bash
+$ as-req -n $NS annotate configmap victim3 --overwrite "$PFX/delete-request=CHG6: status" "$PFX/delete-requested-by=req@example.com" "$PFX/delete-requested-at=$(ts)"
+$ as-a1  -n $NS annotate configmap victim3 --overwrite "$PFX/delete-approvals=a1@example.com|$(ts)"
+$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/status-deletion.sh configmap victim3 -n $NS
+→ requested-at : 2026-09-19T...Z  -> expires 2026-09-20T...Z (1439 min left)
+  approvals    : a1@example.com|2026-09-19T...Z
+                 - a1@example.com  at ...  -> valid until ... (239 min left)
+  progress     : 1 of 2 valid approvals -> 1 more approval(s) needed
+$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/list-pending-deletions.sh
+→ configmaps  guardrails-test/victim3  req@example.com  2026-09-19T...Z  1/2  1
+```
+
+**T6.5 – the approvers are notified, with counts, and reminded.** Continue from T6.4 and watch the approvers' Teams channel and mailbox (docs/19 §6):
+
+| Time | Expected message (approvers' channel only, not the on-call) |
+|---|---|
+| ≤ 60 s after the request in T6.4 | `APPROVAL NEEDED: req@example.com requests deletion of configmaps guardrails-test/victim3`, 2 approvals needed, request expiry |
+| ≤ 60 s after a1's approval | `Approval 1 of 2 recorded by a1@example.com ... - 1 remaining`, oldest approval expiry |
+| ≈ 15–20 min with no further action | `REMINDER: ... waiting for 1 more approval(s)`, repeated hourly |
+| ≤ 60 s after a2 approves (`scripts/approve-deletion.sh configmap victim3 -n $NS` as a2) | `Approval 2 of 2 ... - FULLY APPROVED` |
+| ≈ 30–35 min without execution | `... fully approved but not executed yet` |
+| ≤ 60 s after `scripts/cancel-deletion.sh configmap victim3 -n $NS` | `Deletion request on ... closed: cancelled`; both reminders resolve within 5 min |
+
+Evidence: screenshots of the Teams posts, the email headers, and `logcli query --org-id=audit '{log_type="audit"} |= "guardrails-deletion-tracker/state" | json | objectRef_name="victim3" | line_format "{{.annotations_guardrails_deletion_tracker_state}}"'`.
 
 ## 7. The GitOps path is pre-approved; the Argo CD UI is not ★
 

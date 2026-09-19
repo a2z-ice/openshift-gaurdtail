@@ -26,6 +26,16 @@ spec:
       - name: guardrail
         value: "true"
         matchType: "="
+    routes:
+      # approver notifications (docs/19) go to the approvers' channel only
+      - receiver: guardrail-approvers
+        matchers:
+          - name: audience
+            value: approvers
+            matchType: "="
+        groupWait: 0s
+        groupInterval: 1m
+        repeatInterval: 1h
   receivers:
     - name: guardrail-red
       emailConfigs:
@@ -44,4 +54,22 @@ spec:
             key: url
           sendResolved: true
           title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.description }}{{ "\n" }}{{ end }}'
+    - name: guardrail-approvers
+      emailConfigs:
+        - to: gitops-deletion-approvers@example.com
+          from: openshift-alerts@example.com
+          smarthost: smtp.example.com:587
+          authUsername: openshift-alerts@example.com
+          authPassword:
+            name: guardrail-smtp
+            key: password
+          requireTLS: true
+          sendResolved: false
+      msteamsv2Configs:
+        - webhookURL:
+            name: guardrail-teams-webhook
+            key: url-approvers
+          sendResolved: false
+          title: '{{ .CommonLabels.alertname }}'
           text: '{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.description }}{{ "\n" }}{{ end }}'

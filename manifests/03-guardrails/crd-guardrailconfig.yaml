@@ -34,6 +34,9 @@ spec:
         - name: ApprovalTTL
           type: string
           jsonPath: .spec.approvalTTL
+        - name: RequestTTL
+          type: string
+          jsonPath: .spec.requestTTL
       schema:
         openAPIV3Schema:
           type: object
@@ -128,6 +131,14 @@ spec:
                   description: How long an approval stays valid (Go duration). Enforced by the reaper CronJob, not by admission.
                   type: string
                   default: "4h"
+                  pattern: '^[0-9]+(m|h)$'
+                requestTTL:
+                  description: >-
+                    How long an open deletion request (delete-request + delete-requested-at) stays open (Go duration).
+                    Enforced by the reaper CronJob, which withdraws older, future-dated or undated requests together with
+                    their approvals. Keep it >= approvalTTL and <= the window of the CriticalDeletionPendingApproval rule.
+                  type: string
+                  default: "24h"
                   pattern: '^[0-9]+(m|h)$'
                 runbookURL:
                   description: Link included in every denial message and alert.

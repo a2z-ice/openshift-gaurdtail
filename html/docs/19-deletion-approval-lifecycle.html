@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>19-deletion-approval-lifecycle · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>19 · Deletion approval lifecycle: prevention, notification, memory and time</h1>
+<p>This document follows one deletion request from beginning to end and answers four questions precisely, with the code that is responsible for each answer:</p>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Short answer</th>
+<th>Responsible code</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>How is an accidental deletion of a critical resource prevented?</strong></td>
+<td>kube-apiserver refuses every out-of-band DELETE of a critical object unless the object itself carries a request, two valid approvals from two other people, and the deleter is a third person. It applies to cluster-admin too.</td>
+<td><code>manifests/03-guardrails/vap-critical-delete.yaml</code> rule <strong>V1</strong> (+ V2 to V4)</td>
+</tr>
+<tr>
+<td><strong>How are the approvers notified that they must approve?</strong></td>
+<td>Every change to the request is stamped into the audit log by a recording-only policy; Loki alert rules turn it into a message to the approvers&#39; email list and Teams channel within about a minute, with hourly reminders while the request is pending.</td>
+<td><code>vap-deletion-tracker.yaml</code> → <code>05-alerting/loki-alertingrules-audit.yaml</code> groups <code>guardrails.approvals*</code> → <code>alertmanager-main.yaml</code> receiver <code>guardrail-approvers</code></td>
+</tr>
+<tr>
+<td><strong>How does the system remember how many have approved and how many remain?</strong></td>
+<td>The state lives <strong>on the object</strong> as annotations (request, requester, request time, list of <code>user|time</code> approvals). The policy recounts distinct valid approvers on every request; the tracker publishes <code>have</code>, <code>need</code>, <code>remaining</code>; <code>status-deletion.sh</code> and <code>list-pending-deletions.sh</code> show it.</td>
+<td>annotations <code>guardrails.example.com/delete-*</code>; CEL variables <code>oldApprovers</code>, <code>deletionApproved</code>; tracker <code>have/need/remaining</code>; <code>scripts/lib.sh</code> <code>show_state</code></td>
+</tr>
+<tr>
+<td><strong>How long does the system remember an unfinished process?</strong></td>
+<td>Each approval is valid for <code>approvalTTL</code> (4 h); an open request for <code>requestTTL</code> (24 h, measured from <code>delete-requested-at</code>). A CronJob removes what is older every 10 minutes. The history is kept in the audit trail (90 days in Loki, the SIEM&#39;s retention beyond).</td>
+<td><code>GuardrailConfig</code> <code>approvalTTL</code> / <code>requestTTL</code>; <code>reaper-cronjob.yaml</code></td>
+</tr>
+</tbody></table>
+<p>It also records the defects and gaps found while writing this document, and the fixes now in the repository (§9).</p>
+<hr>
+<h2>1. Architecture</h2>
+<pre class="mermaid">flowchart TB
+    subgraph PEOPLE["Three different people"]
+        REQ["Requester&lt;br/>request-deletion.sh"]
+        APP["Approver 1 and Approver 2&lt;br/>approve-deletion.sh"]
+        EXE["Executor&lt;br/>execute-deletion.sh"]
+    end
+    subgraph KAS["kube-apiserver"]
+        RBAC["RBAC&lt;br/>who may patch or delete"]
+        ENF["guardrails-critical-delete&lt;br/>ENFORCES V1 to V4, failurePolicy Fail"]
+        TRK["guardrails-deletion-tracker&lt;br/>RECORDS state, never denies"]
+        RBAC --> ENF
+        RBAC --> TRK
+    end
+    OBJ[("Critical object in etcd&lt;br/>annotations = the workflow memory&lt;br/>delete-request, requested-by,&lt;br/>requested-at, approvals")]
+    REQ --> RBAC
+    APP --> RBAC
+    EXE --> RBAC
+    ENF -- "allowed writes only" --> OBJ
+    REAPER["approval-reaper CronJob, every 10 min&lt;br/>removes expired approvals and requests"] --> RBAC
+    KAS -- "audit event with&lt;br/>tracker state annotation" --> CLF["ClusterLogForwarder"]
+    CLF --> SIEM[("SIEM&lt;br/>long-term history")]
+    CLF --> LOKI[("LokiStack audit tenant&lt;br/>90 days")]
+    LOKI --> RULER["Loki ruler&lt;br/>guardrails.approvals rules"]
+    RULER --> AM["Alertmanager&lt;br/>route audience=approvers"]
+    AM --> DESK["Approvers email list&lt;br/>and approvers Teams channel"]
+    PROM["Prometheus&lt;br/>GuardrailReaperNotRunning"] --> AM
+    OPS["status-deletion.sh&lt;br/>list-pending-deletions.sh"] -. "read" .-> OBJ
+    classDef enforce fill:#fde7e7,stroke:#b00020,color:#000
+    classDef memory fill:#e8f5e9,stroke:#2e7d32,color:#000
+    classDef notify fill:#e6f2ff,stroke:#0b5cad,color:#000
+    class ENF enforce
+    class OBJ,TRK,REAPER memory
+    class RULER,AM,DESK,PROM notify</pre>
+<p>Two policies look at the same requests with different jobs:</p>
+<table>
+<thead>
+<tr>
+<th>Policy</th>
+<th>Job</th>
+<th>Failure behaviour</th>
+<th>Why separate</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>guardrails-critical-delete</code></td>
+<td><strong>decide</strong>: allow or deny</td>
+<td><code>failurePolicy: Fail</code> (an evaluation error denies)</td>
+<td>a security control must fail closed</td>
+</tr>
+<tr>
+<td><code>guardrails-deletion-tracker</code></td>
+<td><strong>record</strong>: write the resulting state into the audit event</td>
+<td><code>failurePolicy: Ignore</code>, no validations, binding <code>[Audit]</code> in every phase</td>
+<td>timestamp arithmetic can error on odd input; that must never block a legitimate approval or deletion</td>
+</tr>
+</tbody></table>
+<h2>2. How accidental deletion is prevented</h2>
+<h3>2.1 The layers an accident has to get through</h3>
+<pre class="mermaid">flowchart LR
+    CMD["oc delete, console click,&lt;br/>Argo CD UI, script"] --> L1{"RBAC:&lt;br/>may this identity delete?"}
+    L1 -- "no" --> F1["403 RBAC Forbidden"]
+    L1 -- "yes" --> L2{"Critical object?&lt;br/>label or name rule"}
+    L2 -- "no" --> OK1["Deleted normally"]
+    L2 -- "yes" --> L3{"GitOps controller&lt;br/>or break-glass?"}
+    L3 -- "yes" --> OK2["Allowed and alerted"]
+    L3 -- "no" --> L4{"Request, requested-at,&lt;br/>2 distinct approvers,&lt;br/>requester and executor&lt;br/>not among them?"}
+    L4 -- "no" --> F2["403 GUARDRAIL DENIED&lt;br/>CriticalResourceDeleteDenied"]
+    L4 -- "yes" --> OK3["Deleted&lt;br/>CriticalResourceDeleted red alert"]
+    classDef deny fill:#fde7e7,stroke:#b00020,color:#000
+    classDef allow fill:#e8f5e9,stroke:#2e7d32,color:#000
+    class F1,F2 deny
+    class OK1,OK2,OK3 allow</pre>
+<table>
+<thead>
+<tr>
+<th>Accident</th>
+<th>What stops it</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>oc delete argocd openshift-gitops</code> in the wrong terminal</td>
+<td>V1: no request, no approvals → 403</td>
+<td><code>vap-critical-delete.yaml</code> V1</td>
+</tr>
+<tr>
+<td><code>oc delete cm -l guardrails.example.com/critical=true</code> (by selector)</td>
+<td>a <code>deletecollection</code> is evaluated as one DELETE per object; each is denied</td>
+<td>same</td>
+</tr>
+<tr>
+<td>&quot;Remove the label first, then delete&quot;</td>
+<td>V2: removing the critical label needs the same approvals as a deletion</td>
+<td>V2</td>
+</tr>
+<tr>
+<td>Deleting a whole namespace that contains a critical object</td>
+<td>the namespace controller&#39;s per-object deletes are denied (it is not exempt); the platform namespaces themselves are critical by name</td>
+<td>V1, <code>nameCritical</code></td>
+</tr>
+<tr>
+<td>A reviewer approves the wrong object</td>
+<td>the approval is bound to that object only (on-object annotation) and expires after <code>approvalTTL</code></td>
+<td>data model §3</td>
+</tr>
+<tr>
+<td>The executor types the wrong name</td>
+<td><code>execute-deletion.sh</code> requires typing the resource name; the policy checks the approvals of <em>that</em> object</td>
+<td><code>scripts/execute-deletion.sh</code></td>
+</tr>
+<tr>
+<td>Approvals collected long ago are used today</td>
+<td>the reaper removes approvals older than 4 h and requests older than 24 h</td>
+<td><code>reaper-cronjob.yaml</code></td>
+</tr>
+<tr>
+<td>Someone edits the reason after the approvals were given</td>
+<td>V4: any change to request, requester or request time requires the approvals to be cleared in the same write</td>
+<td>V4</td>
+</tr>
+<tr>
+<td>Argo CD UI &quot;Delete&quot;</td>
+<td><code>argocd-server</code> is not a GitOps controller; the workflow applies</td>
+<td><code>GuardrailConfig.gitopsControllers</code></td>
+</tr>
+<tr>
+<td>A merged PR removed the manifest</td>
+<td>pre-approved GitOps path (two reviewers in GitHub); the deletion is announced as <code>GitOpsCriticalDeletionApplied</code></td>
+<td>docs/05, docs/08</td>
+</tr>
+</tbody></table>
+<p>In phase 1 and 2 the same evaluation runs but only records (<code>CriticalDeleteWouldBeDenied</code>) or warns; enforcement starts in phase 3 (docs/10).</p>
+<h3>2.2 The rule that decides (V1)</h3>
+<pre><code class="language-yaml"># manifests/03-guardrails/vap-critical-delete.yaml
+- name: deletionApproved
+  expression: &gt;-
+    variables.oldRequestedBy != &#39;&#39; &amp;&amp; variables.oldRequest != &#39;&#39; &amp;&amp; variables.oldRequestedAt != &#39;&#39;
+    &amp;&amp; variables.oldApprovers.size() &gt;= params.spec.minApprovers
+    &amp;&amp; variables.oldApproversDistinct
+    &amp;&amp; !(variables.oldRequestedBy in variables.oldApprovers)
+    &amp;&amp; (params.spec.executorMayBeApprover || !(request.userInfo.username in variables.oldApprovers))
+validations:
+  # V1 - DELETE needs the two-person rule satisfied
+  - expression: &gt;-
+      !variables.isCritical || variables.isExempt || request.operation != &#39;DELETE&#39; || variables.deletionApproved
+      || variables.isOlmCsvReplacement
+</code></pre>
+<p>Everything is read from <code>oldObject</code>, the stored object <strong>before</strong> the request. A DELETE request cannot carry its own approvals; they must already be on the stored object, where each one was admitted separately under V3.</p>
+<h2>3. The memory: where the workflow state lives</h2>
+<h3>3.1 Data model</h3>
+<p>The state of a deletion request is four annotations on the object being deleted:</p>
+<table>
+<thead>
+<tr>
+<th>Annotation (<code>guardrails.example.com/</code>)</th>
+<th>Written by</th>
+<th>Format</th>
+<th>Enforced by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>delete-request</code></td>
+<td>requester</td>
+<td><code>&quot;&lt;change-ticket&gt;: &lt;reason&gt;&quot;</code></td>
+<td>V4: non-empty, only by its author</td>
+</tr>
+<tr>
+<td><code>delete-requested-by</code></td>
+<td>requester</td>
+<td>the requester&#39;s own username</td>
+<td>V4: must equal <code>request.userInfo.username</code>; author in requester or approver groups</td>
+</tr>
+<tr>
+<td><code>delete-requested-at</code></td>
+<td>requester</td>
+<td>RFC3339 UTC, <code>2026-09-19T08:00:00Z</code></td>
+<td>V4: must match the RFC3339 pattern; part of the request, so changing it needs approvals cleared</td>
+</tr>
+<tr>
+<td><code>delete-approvals</code></td>
+<td>each approver, one entry at a time</td>
+<td><code>user|RFC3339Z,user|RFC3339Z</code></td>
+<td>V3: exactly one appended entry naming the caller, caller in approver group, not the requester, not a duplicate, nothing else changed</td>
+</tr>
+</tbody></table>
+<p>Why on the object and not in a separate &quot;approval ticket&quot; resource:</p>
+<ul>
+<li><strong>No extra component.</strong> A CRD-based ticket would need a controller or a multi-parameter lookup; VAP <code>paramRef.selector</code> validates against <em>every</em> matching parameter, which makes &quot;the matching ticket&quot; unreliable.</li>
+<li><strong>The evidence travels with the object.</strong> Every approval is an audited write to that object, so <code>audit-query.sh &lt;name&gt;</code> shows the whole history.</li>
+<li><strong>Self-cleaning.</strong> When the object is deleted, its approvals are deleted with it. Nothing can be reused for another object.</li>
+</ul>
+<h3>3.2 The object at each step</h3>
+<pre><code class="language-yaml"># 1. after request-deletion.sh (requester alice)
+metadata:
+  labels:      { guardrails.example.com/critical: &quot;true&quot; }
+  annotations:
+    guardrails.example.com/delete-request:      &quot;CHG0012345: decommission old instance&quot;
+    guardrails.example.com/delete-requested-by: &quot;alice@example.com&quot;
+    guardrails.example.com/delete-requested-at: &quot;2026-09-19T08:00:00Z&quot;
+# 2. after approver bob
+    guardrails.example.com/delete-approvals:    &quot;bob@example.com|2026-09-19T08:05:12Z&quot;
+# 3. after approver carol: 2 of 2, ready for a third person to execute
+    guardrails.example.com/delete-approvals:    &quot;bob@example.com|2026-09-19T08:05:12Z,carol@example.com|2026-09-19T09:40:03Z&quot;
+# 4. executor dave deletes: the object and these annotations are gone; the audit trail keeps every step
+</code></pre>
+<h3>3.3 State machine</h3>
+<pre class="mermaid">stateDiagram-v2
+    [*] --> NoRequest
+    NoRequest --> Requested: requester opens request
+    Requested --> PartlyApproved: approver 1 appends
+    PartlyApproved --> FullyApproved: approver 2 appends
+    PartlyApproved --> Requested: reaper removes expired approval
+    FullyApproved --> PartlyApproved: reaper removes expired approval
+    FullyApproved --> Deleted: third person executes
+    Requested --> NoRequest: cancel or request expired
+    PartlyApproved --> NoRequest: cancel or request expired
+    FullyApproved --> NoRequest: cancel or request expired
+    Requested --> Requested: request changed, approvals cleared
+    Deleted --> [*]</pre>
+<p>Every arrow is one audited write to the object. The tracker names each one: <code>requested</code>, <code>approved</code>, <code>expired</code>, <code>approvals-cleared</code>, <code>cancelled</code>, <code>request-expired</code>, <code>executed</code>.</p>
+<h3>3.4 Current state versus history</h3>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Where</th>
+<th>How long</th>
+<th>Read with</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Current state of an open request</td>
+<td>annotations in etcd (encrypted)</td>
+<td>until executed, cancelled or expired</td>
+<td><code>scripts/status-deletion.sh</code>, <code>scripts/list-pending-deletions.sh</code></td>
+</tr>
+<tr>
+<td>Every step, with actor, time, request body and policy decision</td>
+<td>API-server audit log → Loki audit tenant</td>
+<td>90 days</td>
+<td><code>scripts/audit-query.sh &lt;name&gt;</code>, LogQL below</td>
+</tr>
+<tr>
+<td>Same, long term</td>
+<td>SIEM (Splunk), WORM</td>
+<td>your SIEM retention (typically ≥ 1 year)</td>
+<td>SPL from <code>audit-query.sh</code></td>
+</tr>
+<tr>
+<td>Structured state per step (<code>have</code>, <code>need</code>, <code>remaining</code>, expiries)</td>
+<td>audit annotation <code>guardrails-deletion-tracker/state</code></td>
+<td>as the audit log</td>
+<td>LogQL below</td>
+</tr>
+</tbody></table>
+<h2>4. Counting: how approvals are counted, and what &quot;remaining&quot; means</h2>
+<h3>4.1 In the enforcing policy (what decides)</h3>
+<pre><code class="language-yaml">- name: oldApprovals          # &quot;bob|t1,carol|t2&quot; -&gt; [&quot;bob|t1&quot;, &quot;carol|t2&quot;]
+  expression: &quot;variables.oldApprovalsRaw == &#39;&#39; ? [] : variables.oldApprovalsRaw.split(&#39;,&#39;)&quot;
+- name: oldApprovers          # -&gt; [&quot;bob&quot;, &quot;carol&quot;]
+  expression: &quot;variables.oldApprovals.map(e, e.split(&#39;|&#39;)[0])&quot;
+- name: oldApproversDistinct  # nobody counted twice, at most 32 entries
+  expression: &quot;variables.oldApprovers.size() &lt;= 32 &amp;&amp; variables.oldApprovers.all(u, variables.oldApprovers.filter(x, x == u).size() == 1)&quot;
+</code></pre>
+<p><code>deletionApproved</code> then requires <code>size() &gt;= minApprovers</code>, all distinct, the requester not among them and the executor not among them. The count is recomputed from the stored annotation on <strong>every</strong> request. Nothing is cached, so nothing can drift.</p>
+<p>V3 guarantees that the list only ever contains entries that passed the approver checks at the time they were written. Expired entries are removed by the reaper (§5), so the stored list is the set of currently valid approvals, up to one reaper interval.</p>
+<h3>4.2 In the tracker (what is reported)</h3>
+<pre><code class="language-yaml"># manifests/03-guardrails/vap-deletion-tracker.yaml
+- name: have        # distinct well-formed approvers other than the requester
+  expression: &quot;variables.approvers.filter(u, u != variables.reqBy).size()&quot;
+- name: need
+  expression: &quot;int(params.spec.minApprovers)&quot;
+- name: remaining
+  expression: &quot;variables.open &amp;&amp; variables.need &gt; variables.have ? variables.need - variables.have : 0&quot;
+- name: ready       # open and nothing remaining: waiting for the executor
+  expression: &quot;variables.open &amp;&amp; variables.remaining == 0&quot;
+</code></pre>
+<p>Emitted into the audit event of each step, for example after the first approval:</p>
+<pre><code class="language-text">annotations[&quot;guardrails-deletion-tracker/state&quot;] =
+  event=approved open=1 ready=0 have=1 need=2 remaining=1 requested_by=alice@example.com
+  requested_at=2026-09-19T08:00:00Z request_expires=2026-09-20T08:00:00Z
+  first_approval_expires=2026-09-19T12:05:12Z actor=bob@example.com approvers=&quot;bob@example.com&quot; req=&quot;CHG0012345: decommission old instance&quot;
+</code></pre>
+<h3>4.3 On the command line (what people see)</h3>
+<pre><code class="language-text">$ scripts/status-deletion.sh argocd openshift-gitops -n openshift-gitops
+Resource     : argocd/openshift-gitops -n openshift-gitops
+critical     : true
+request      : CHG0012345: decommission old instance
+requested-by : alice@example.com
+requested-at : 2026-09-19T08:00:00Z  -&gt; expires 2026-09-20T08:00:00Z (1310 min left)
+approvals    : bob@example.com|2026-09-19T08:05:12Z
+               - bob@example.com  at 2026-09-19T08:05:12Z  -&gt; valid until 2026-09-19T12:05:12Z (175 min left)
+progress     : 1 of 2 valid approvals -&gt; 1 more approval(s) needed
+
+$ scripts/list-pending-deletions.sh
+KIND        NAMESPACE/NAME                      REQUESTED-BY        REQUESTED-AT          HAVE  REMAINING
+argocds     openshift-gitops/openshift-gitops   alice@example.com   2026-09-19T08:00:00Z  1/2   1
+</code></pre>
+<p><code>show_state</code> (in <code>scripts/lib.sh</code>) applies the same rules as the policy and the reaper. An expired, future-dated or malformed approval is shown with the reason it will be removed, and it is not counted.</p>
+<h2>5. Time: how long the system remembers</h2>
+<p>CEL in admission has no clock, so admission cannot expire anything. Time is enforced by the <strong>approval reaper</strong>, a CronJob that runs every 10 minutes under its own service account. The policy lets that account only <em>remove</em> entries.</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Lifetime</th>
+<th>Measured from</th>
+<th>Removed by</th>
+<th>Effective maximum</th>
+<th>Tunable</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>One approval</td>
+<td><code>approvalTTL</code> = <strong>4 h</strong></td>
+<td>the timestamp in its <code>user|time</code> entry</td>
+<td>reaper, step 2</td>
+<td>4 h + up to 10 min + job runtime</td>
+<td><code>GuardrailConfig.spec.approvalTTL</code> (PR)</td>
+</tr>
+<tr>
+<td>An open request (and all its approvals)</td>
+<td><code>requestTTL</code> = <strong>24 h</strong></td>
+<td><code>delete-requested-at</code></td>
+<td>reaper, step 1</td>
+<td>24 h + up to 10 min</td>
+<td><code>GuardrailConfig.spec.requestTTL</code> (PR)</td>
+</tr>
+<tr>
+<td>A future-dated entry (more than 5 min ahead)</td>
+<td>removed at the next run</td>
+<td>reaper clock</td>
+<td>reaper</td>
+<td>about 10 min</td>
+<td>–</td>
+</tr>
+<tr>
+<td>An undated or malformed request</td>
+<td>withdrawn at the next run</td>
+<td>–</td>
+<td>reaper</td>
+<td>about 10 min</td>
+<td>–</td>
+</tr>
+<tr>
+<td>&quot;Pending approval&quot; reminder</td>
+<td>while the last recorded state has <code>remaining &gt; 0</code></td>
+<td>last state change</td>
+<td>Loki rule window 25 h</td>
+<td>≥ <code>requestTTL</code> (CI checks)</td>
+<td>rule window</td>
+</tr>
+<tr>
+<td>&quot;Awaiting execution&quot; reminder</td>
+<td>while the last state has <code>ready = 1</code></td>
+<td>last state change</td>
+<td>Loki rule window 5 h</td>
+<td>≥ <code>approvalTTL</code> (CI checks)</td>
+<td>rule window</td>
+</tr>
+<tr>
+<td>History of the whole process</td>
+<td>audit log</td>
+<td>each write</td>
+<td>Loki retention / SIEM</td>
+<td>90 days / SIEM retention</td>
+<td>LokiStack, SIEM</td>
+</tr>
+</tbody></table>
+<pre class="mermaid">gantt
+    title One request opened at 08:00 with the default lifetimes
+    dateFormat HH:mm
+    axisFormat %H:%M
+    section Request
+    Request open until requestTTL           :active, r1, 08:00, 24h
+    section Approvals
+    Approval 1 by bob valid 4h              :a1, 08:05, 4h
+    Approval 2 by carol valid 4h            :a2, 09:40, 4h
+    Window where both are valid             :crit, w1, 09:40, 145m
+    section Reaper
+    Runs every 10 minutes                   :done, rp, 08:00, 24h</pre>
+<p>Consequences worth knowing:</p>
+<ul>
+<li><strong>Both approvals must be valid at the same moment.</strong> With a 4 h TTL, the second approval must come within 4 h of the first, and the executor must act before the first one expires. <code>first_approval_expires</code> in every notification tells everyone the deadline.</li>
+<li><strong>A request cannot be kept alive artificially.</strong> Changing <code>delete-requested-at</code> alone is a request change (V4), so it is only allowed together with clearing the approvals.</li>
+<li><strong>Timestamps come from the writer&#39;s clock.</strong> The API server cannot check them (no clock in CEL). A back-dated entry only shortens its own life. A future-dated one is removed by the reaper within 10 minutes. Approvals are checked for the caller&#39;s identity, not for accurate time.</li>
+<li><a id="reaper-health"></a><strong>If the reaper stops, time stops.</strong> <code>GuardrailReaperFailing</code> fires on a failed job, and <code>GuardrailReaperNotRunning</code> fires when no job has completed for 30 minutes, when the CronJob is suspended, or when it is missing. The CronJob is GitOps-only and self-healed.</li>
+</ul>
+<p>The reaper&#39;s own logic (<code>manifests/03-guardrails/reaper-cronjob.yaml</code>, <code>reap.sh</code>):</p>
+<pre><code class="language-bash"># 1. request lifetime: undated, invalid, future-dated or older than requestTTL -&gt; withdraw everything in ONE write
+if (( RA_SEC == 0 || NOW - RA_SEC &gt; REQ_TTL_SEC || RA_SEC &gt; NOW + 300 )); then
+  oc annotate &quot;$RES&quot; &quot;$NAME&quot; --overwrite --resource-version=&quot;$RV&quot; \
+    &quot;${PFX}/delete-request-&quot; &quot;${PFX}/delete-requested-by-&quot; &quot;${PFX}/delete-requested-at-&quot; &quot;${ANN}-&quot;
+# 2. approval lifetime: keep only entries younger than approvalTTL and not more than 5 min in the future
+if (( NOW - TS_SEC &gt; TTL_SEC || TS_SEC &gt; NOW + 300 )); then echo &quot;expire ...&quot;; else KEEP=&quot;${KEEP:+${KEEP},}${E}&quot;; fi
+</code></pre>
+<p><code>--resource-version</code> makes every reaper write conditional: if an approver writes at the same moment, the reaper&#39;s write conflicts and is retried at the next run. It never overwrites a fresh approval.</p>
+<h2>6. Notification: how approvers learn that they must act</h2>
+<h3>6.1 End to end</h3>
+<pre class="mermaid">sequenceDiagram
+    autonumber
+    participant R as Requester
+    participant K as kube-apiserver
+    participant T as deletion tracker policy
+    participant L as Loki ruler
+    participant A as Alertmanager
+    participant D as Approvers email and Teams
+    R->>K: request-deletion.sh sets request, requested-by, requested-at
+    K->>T: evaluate UPDATE
+    T-->>K: audit annotation state event=requested need=2 remaining=2
+    K->>L: audit event via ClusterLogForwarder, seconds
+    L->>A: CriticalDeletionRequested within 30 to 60 s
+    A->>D: APPROVAL NEEDED card and email, group_wait 0s
+    Note over D: approver 1 runs approve-deletion.sh
+    L->>A: CriticalDeletionApproved have=1 need=2 remaining=1
+    A->>D: Approval 1 of 2, 1 remaining, oldest expires at
+    Note over L: every 5 min: last state still remaining above 0
+    L->>A: CriticalDeletionPendingApproval after 15 min
+    A->>D: REMINDER, repeated every hour
+    Note over D: approver 2 runs approve-deletion.sh
+    L->>A: CriticalDeletionApproved remaining=0
+    A->>D: Approval 2 of 2 FULLY APPROVED, executor may act
+    Note over L: ready=1 for 30 min without execution
+    L->>A: CriticalDeletionAwaitingExecution
+    Note over D: executor runs execute-deletion.sh
+    L->>A: CriticalDeletionRequestClosed event=executed
+    L->>A: CriticalResourceDeleted, red, platform and security on-call</pre>
+<h3>6.2 The notifications</h3>
+<p>All carry <code>guardrail=&quot;true&quot;</code>, <code>audience=&quot;approvers&quot;</code>, <code>severity=&quot;info&quot;</code> and a runbook link to this document.</p>
+<table>
+<thead>
+<tr>
+<th>Alert</th>
+<th>Fires when</th>
+<th>Tells the approvers</th>
+<th>Anchor</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CriticalDeletionRequested</code></td>
+<td>a request is opened or changed</td>
+<td>who, what object, reason and ticket, how many approvals are needed, when the request expires, the exact approve command</td>
+<td><a id="notification-1-request-opened"></a>request opened</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionApproved</code></td>
+<td>an approval is appended</td>
+<td>&quot;approval <em>have</em> of <em>need</em>&quot;, who approved, remaining count or <strong>FULLY APPROVED</strong>, when the oldest approval expires</td>
+<td><a id="notification-2-approval-recorded"></a>approval recorded</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionApprovalsExpired</code></td>
+<td>the reaper removed approvals</td>
+<td>how many are left and how many are needed again</td>
+<td><a id="notification-3-approval-expired"></a>approval expired</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionRequestClosed</code></td>
+<td>cancelled, request expired, approvals cleared, or executed</td>
+<td>which of these happened and by whom</td>
+<td><a id="notification-4-request-closed"></a>request closed</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionPendingApproval</code></td>
+<td>the last state has <code>remaining &gt; 0</code> for 15 min</td>
+<td>reminder with the number still needed (the alert value)</td>
+<td><a id="reminders"></a>reminders</td>
+</tr>
+<tr>
+<td><code>CriticalDeletionAwaitingExecution</code></td>
+<td>the last state has <code>ready = 1</code> for 30 min</td>
+<td>fully approved, waiting for a third person to execute</td>
+<td>reminders</td>
+</tr>
+</tbody></table>
+<p>The platform and security on-call are <strong>not</strong> paged by these workflow messages. They still receive:</p>
+<ul>
+<li><code>CriticalDeletionApprovalRecorded</code>: info, platform Teams, batched;</li>
+<li><code>CriticalResourceDeleted</code>: red, email and Teams, when the deletion happens;</li>
+<li><code>CriticalResourceDeleteDenied</code>: when someone tries without approvals.</li>
+</ul>
+<h3>6.3 How a rule reads the tracker&#39;s state</h3>
+<pre><code class="language-logql">{log_type=&quot;audit&quot;} |= &quot;guardrails-deletion-tracker/state&quot;        # cheap line filter first
+  | json                                                          # flattens the audit event
+  | responseStatus_code &gt;= 200 and responseStatus_code &lt; 300      # only writes that were accepted
+  | line_format &quot;{{.annotations_guardrails_deletion_tracker_state}}&quot;
+  | logfmt                                                        # event, have, need, remaining, ... become labels
+  | event=&quot;approved&quot;
+</code></pre>
+<p>The reminder uses the <strong>last</strong> recorded value per object:</p>
+<pre><code class="language-logql">last_over_time( &lt;the pipeline above&gt; | unwrap remaining | __error__=&quot;&quot; [25h] )
+  by (objectRef_resource, objectRef_namespace, objectRef_name) &gt; 0
+</code></pre>
+<p>The reminder resolves on its own when the latest state has <code>remaining=0</code> (fully approved, cancelled, expired or executed). The window (25 h) is longer than <code>requestTTL</code> (24 h), so a request is always either resolved or withdrawn by the reaper, which records <code>remaining=0</code>, before it drops out of the window. CI enforces window ≥ <code>requestTTL</code>.</p>
+<h3>6.4 Routing and channels</h3>
+<pre><code class="language-yaml"># manifests/05-alerting/alertmanager-main.yaml (first child route)
+- matchers: [guardrail=&quot;true&quot;, audience=&quot;approvers&quot;]
+  receiver: guardrail-approvers        # email to the approvers&#39; list + the approvers&#39; Teams channel
+  group_by: [alertname, objectRef_resource, objectRef_namespace, objectRef_name]
+  group_wait: 0s                       # immediately
+  group_interval: 1m
+  repeat_interval: 1h                  # reminders repeat hourly while firing
+  # no &quot;continue&quot;: workflow messages do not go to the incident channels
+</code></pre>
+<p>Setup:</p>
+<ol>
+<li>Create a Teams channel for the deletion desk (for example &quot;OpenShift deletion approvals&quot;) and a Workflows webhook for it, exactly as in <code>docs/06</code> §Teams. Store the URL in the vault.</li>
+<li>Create an email distribution list that mirrors the IdP group <code>gitops-deletion-approvers</code>.</li>
+<li>Replace the placeholders <code>gitops-deletion-approvers@example.com</code> and <code>REPLACE-APPROVERS</code> in <code>alertmanager-main.yaml</code> (docs/00), render the secret from the vault, and install it.</li>
+<li>Test the route with a scratch object in <code>guardrails-test</code> (§10, T6.5).</li>
+</ol>
+<p>The Teams card and email show the approval fields when present: <strong>Approvals</strong> <em>have of need (remaining)</em>, <strong>Requested by</strong> with the reason, <strong>Request expires</strong>, <strong>Oldest approval expires</strong>.</p>
+<p><strong>Approving is deliberately not possible from Teams or email.</strong> An approval must be an authenticated API write by the approver&#39;s own identity: V3 checks that the entry names the caller, that the caller is in the approver group, and that the session carries a real login marker (docs/17). A button in a chat message would move that check to a system outside the cluster&#39;s audit trail.</p>
+<h3>6.5 When a notification cannot arrive</h3>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Detection</th>
+<th>Fallback</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Audit forwarder stopped</td>
+<td><code>AuditLogIngestionStalled</code>, <code>AuditForwarderNotReady</code> (metrics)</td>
+<td><code>list-pending-deletions.sh</code>; the requester pings approvers directly</td>
+</tr>
+<tr>
+<td>Loki ruler down</td>
+<td><code>LokiRulerDown</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td>Teams or SMTP failing</td>
+<td><code>GuardrailNotificationFailing</code></td>
+<td>email and Teams are independent; the platform on-call gets the failure</td>
+</tr>
+<tr>
+<td>Tracker policy missing</td>
+<td><code>GuardrailPolicyModified</code> (P1); <code>verify-install.sh</code></td>
+<td>the enforcement is unaffected: notifications are a convenience, not the control</td>
+</tr>
+</tbody></table>
+<h2>7. Responsible code map</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Element</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>manifests/03-guardrails/vap-critical-delete.yaml</code></td>
+<td><code>labelCritical</code>, <code>nameCritical</code>, <code>isCritical</code></td>
+<td>which objects are protected</td>
+</tr>
+<tr>
+<td></td>
+<td><code>oldRequest</code>, <code>oldRequestedBy</code>, <code>oldRequestedAt</code>, <code>oldApprovals</code>, <code>oldApprovers</code>, <code>oldApproversDistinct</code></td>
+<td>read the stored workflow state</td>
+</tr>
+<tr>
+<td></td>
+<td><code>deletionApproved</code></td>
+<td>the two-person rule</td>
+</tr>
+<tr>
+<td></td>
+<td>V1 / V2 / V3 / V4</td>
+<td>deny unapproved delete / unlabel / forged approval / tampered request</td>
+</tr>
+<tr>
+<td></td>
+<td><code>auditAnnotations.decision</code></td>
+<td>per-request decision record for the red and denied alerts</td>
+</tr>
+<tr>
+<td><code>manifests/03-guardrails/vap-deletion-tracker.yaml</code></td>
+<td><code>have</code>, <code>need</code>, <code>remaining</code>, <code>ready</code>, <code>requestExpires</code>, <code>firstApprovalExpires</code>, <code>event</code></td>
+<td>compute and record the state after each step (never denies)</td>
+</tr>
+<tr>
+<td><code>manifests/03-guardrails/crd-guardrailconfig.yaml</code>, <code>guardrailconfig-default.yaml</code></td>
+<td><code>minApprovers</code>, <code>executorMayBeApprover</code>, <code>approverGroups</code>, <code>requesterGroups</code>, <code>approvalTTL</code>, <code>requestTTL</code>, <code>reaperUsers</code></td>
+<td>the parameters</td>
+</tr>
+<tr>
+<td><code>manifests/03-guardrails/reaper-cronjob.yaml</code></td>
+<td><code>reap.sh</code> steps 1 and 2, ClusterRole <code>guardrails-approval-reaper</code></td>
+<td>time: withdraw old requests, remove old approvals; remove-only rights</td>
+</tr>
+<tr>
+<td><code>manifests/02-rbac/clusterroles.yaml</code>, <code>rolebindings.yaml</code></td>
+<td>approver, requester and executor roles with <code>resourceNames</code></td>
+<td>who may write annotations or delete at all</td>
+</tr>
+<tr>
+<td><code>manifests/05-alerting/loki-alertingrules-audit.yaml</code></td>
+<td>groups <code>guardrails.approvals</code>, <code>guardrails.approvals.reminders</code>; <code>CriticalResourceDeleted</code>, <code>CriticalResourceDeleteDenied</code>, <code>CriticalDeletionApprovalRecorded</code></td>
+<td>notifications and red alerts</td>
+</tr>
+<tr>
+<td><code>manifests/05-alerting/prometheusrule-gitops-health.yaml</code></td>
+<td><code>GuardrailReaperFailing</code>, <code>GuardrailReaperNotRunning</code></td>
+<td>the clock is running</td>
+</tr>
+<tr>
+<td><code>manifests/05-alerting/alertmanager-main.yaml</code></td>
+<td>route <code>audience=&quot;approvers&quot;</code>, receiver <code>guardrail-approvers</code>, template fields</td>
+<td>delivery to the approvers</td>
+</tr>
+<tr>
+<td><code>manifests/04-argocd/application-guardrails.yaml</code></td>
+<td><code>ignoreDifferences</code> for the four annotations</td>
+<td>Argo CD does not revert workflow annotations</td>
+</tr>
+<tr>
+<td><code>scripts/lib.sh</code></td>
+<td>annotation keys, <code>show_state</code>, time helpers</td>
+<td>the contract and the progress view</td>
+</tr>
+<tr>
+<td><code>scripts/request-deletion.sh</code></td>
+<td>sets request, requester, <code>requested-at</code>, clears approvals</td>
+<td>open</td>
+</tr>
+<tr>
+<td><code>scripts/approve-deletion.sh</code></td>
+<td>appends <code>me|now</code> with <code>--resource-version</code></td>
+<td>approve, race-safe</td>
+</tr>
+<tr>
+<td><code>scripts/execute-deletion.sh</code></td>
+<td>pre-checks, typed confirmation, <code>oc delete</code></td>
+<td>execute</td>
+</tr>
+<tr>
+<td><code>scripts/cancel-deletion.sh</code></td>
+<td>clears all four annotations</td>
+<td>cancel</td>
+</tr>
+<tr>
+<td><code>scripts/status-deletion.sh</code>, <code>scripts/list-pending-deletions.sh</code></td>
+<td>read-only views</td>
+<td>memory, human-readable</td>
+</tr>
+<tr>
+<td><code>.github/workflows/policy-ci.yaml</code></td>
+<td>CEL literal/bracket check, tracker parity, TTL windows, annotation contract</td>
+<td>keeps all of the above consistent</td>
+</tr>
+</tbody></table>
+<h2>8. The complete flow, with every check</h2>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Who</th>
+<th>Command</th>
+<th>Policy checks</th>
+<th>Tracker event</th>
+<th>Notification</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>requester</td>
+<td><code>request-deletion.sh &lt;kind&gt; &lt;name&gt; [-n ns] &quot;CHG…: reason&quot;</code></td>
+<td>V4: author = caller, in requester/approver groups, reason non-empty, <code>requested-at</code> RFC3339, approvals cleared, nothing else changed</td>
+<td><code>requested</code></td>
+<td><code>CriticalDeletionRequested</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>approver 1</td>
+<td><code>approve-deletion.sh &lt;kind&gt; &lt;name&gt; [-n ns]</code></td>
+<td>V3: one entry, names caller, approver group, not requester, not already approved, request complete and unchanged, nothing else changed; real login marker</td>
+<td><code>approved</code> have=1</td>
+<td><code>CriticalDeletionApproved</code> 1 of 2</td>
+</tr>
+<tr>
+<td>3</td>
+<td>approver 2</td>
+<td>same, own login</td>
+<td>same</td>
+<td><code>approved</code> have=2 ready=1</td>
+<td><code>CriticalDeletionApproved</code> FULLY APPROVED</td>
+</tr>
+<tr>
+<td>4</td>
+<td>executor</td>
+<td><code>execute-deletion.sh &lt;kind&gt; &lt;name&gt; [-n ns]</code></td>
+<td>V1: request complete, ≥ 2 distinct approvers, requester and executor not among them</td>
+<td><code>executed</code></td>
+<td><code>CriticalDeletionRequestClosed</code>, <code>CriticalResourceDeleted</code> (red)</td>
+</tr>
+<tr>
+<td>any</td>
+<td>anyone with patch</td>
+<td><code>cancel-deletion.sh …</code></td>
+<td>V3 (clear allowed), V4 (clear allowed)</td>
+<td><code>cancelled</code></td>
+<td><code>CriticalDeletionRequestClosed</code></td>
+</tr>
+<tr>
+<td>every 10 min</td>
+<td>reaper</td>
+<td>CronJob</td>
+<td>V3/V4 remove-only paths</td>
+<td><code>expired</code> / <code>request-expired</code></td>
+<td><code>CriticalDeletionApprovalsExpired</code> / <code>CriticalDeletionRequestClosed</code></td>
+</tr>
+</tbody></table>
+<h2>9. Defects and gaps found, and what was fixed</h2>
+<p>Found while tracing this lifecycle through the code on 2026-09-19. All are fixed in this repository.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Severity</th>
+<th>Finding</th>
+<th>Impact</th>
+<th>Fix</th>
+<th>Files</th>
+<th>Test</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>D1</td>
+<td><strong>Critical</strong></td>
+<td><code>isOlmCsvReplacement</code> ended with a stray <code>&quot;</code> inside a <code>&gt;-</code> block, so the CEL did not compile</td>
+<td>every evaluation that reached it errored; with <code>failurePolicy: Fail</code>, OLM could not delete a superseded GitOps-operator CSV in phase 3 (operator upgrades blocked)</td>
+<td>quote removed</td>
+<td><code>vap-critical-delete.yaml</code></td>
+<td>CI CEL check; operator upgrade on pre-prod (docs/16 matrix)</td>
+</tr>
+<tr>
+<td>D2</td>
+<td><strong>Critical</strong></td>
+<td><code>isTrustedWriter</code> ended with the same stray <code>&quot;</code></td>
+<td>the <code>-hardened</code> binding (Deny in every phase) would deny Argo CD&#39;s own updates to the policies, bindings and GuardrailConfig: self-heal and GitOps changes to the guardrail itself would fail</td>
+<td>quote removed</td>
+<td><code>vap-gitops-only-mutation.yaml</code></td>
+<td>CI CEL check; T8.1</td>
+</tr>
+<tr>
+<td>G1</td>
+<td>High</td>
+<td>approvers were not notified: the only signal was an <code>info</code> alert to the platform Teams channel, batched, without counts</td>
+<td>requests waited until someone noticed; approvers had to be chased manually</td>
+<td>tracker policy + four event alerts + dedicated route and receiver to the approvers&#39; list and channel</td>
+<td><code>vap-deletion-tracker.yaml</code>, <code>loki-alertingrules-audit.yaml</code>, <code>alertmanager-main.yaml</code>, <code>alertmanagerconfig-uwm-alternative.yaml</code></td>
+<td>T6.5</td>
+</tr>
+<tr>
+<td>G2</td>
+<td>High</td>
+<td>no view of &quot;how many approved, how many remaining&quot; except reading raw annotations</td>
+<td>mistakes (expired entries counted by eye, executing too early)</td>
+<td><code>have/need/remaining</code> in the tracker and in every notification; <code>status-deletion.sh</code>, <code>list-pending-deletions.sh</code>; <code>show_state</code> marks expired/future/invalid entries</td>
+<td><code>lib.sh</code>, new scripts</td>
+<td>T6.4</td>
+</tr>
+<tr>
+<td>G3</td>
+<td>High</td>
+<td>a request never expired (only approvals did) and carried no time</td>
+<td>stale requests stayed on objects indefinitely; a months-old request could be approved and executed out of context</td>
+<td><code>delete-requested-at</code> (V4-validated, part of the request), <code>requestTTL</code> (24 h), reaper withdraws old, undated, invalid or future-dated requests</td>
+<td><code>vap-critical-delete.yaml</code>, CRD, config, reaper, scripts, Argo CD <code>ignoreDifferences</code></td>
+<td>automated §5, §6, §8; T4.17, T4.18, T6.3</td>
+</tr>
+<tr>
+<td>G4</td>
+<td>Medium</td>
+<td>no reminders for a request stuck waiting for approvals or execution</td>
+<td>silent expiry</td>
+<td><code>CriticalDeletionPendingApproval</code>, <code>CriticalDeletionAwaitingExecution</code> (hourly)</td>
+<td>Loki rules</td>
+<td>T6.5</td>
+</tr>
+<tr>
+<td>G5</td>
+<td>Medium</td>
+<td>a stopped, suspended or deleted reaper was not alerted (only a failed job was)</td>
+<td>expired approvals would silently remain valid</td>
+<td><code>GuardrailReaperNotRunning</code></td>
+<td><code>prometheusrule-gitops-health.yaml</code></td>
+<td>docs/11 alert delivery</td>
+</tr>
+<tr>
+<td>G6</td>
+<td>Low</td>
+<td><code>approve-deletion.sh</code> wrote without optimistic concurrency</td>
+<td>two simultaneous approvals: the second was <em>denied</em> by V3 (&quot;dropped&quot; entry), which looked like a policy error</td>
+<td><code>--resource-version</code>: a clean conflict and &quot;re-run to retry&quot;</td>
+<td><code>approve-deletion.sh</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>G8</td>
+<td>Low</td>
+<td>the reaper parsed timestamps with GNU <code>date -d</code>, which also accepts <code>&quot;&quot;</code> (today 00:00) and words such as <code>now</code> or <code>yesterday</code></td>
+<td>an approval written as <code>user|now</code> (admissible in phases 1–2, where V3 only records) would never expire; an undated request would not be withdrawn</td>
+<td>strict RFC3339 check before parsing, in the reaper and in <code>scripts/lib.sh</code></td>
+<td><code>reaper-cronjob.yaml</code>, <code>lib.sh</code></td>
+<td>reaper simulation with a stub <code>oc</code> (fresh, expired, stale, undated, future, word-dated)</td>
+</tr>
+<tr>
+<td>G7</td>
+<td>Medium</td>
+<td>CI parsed YAML but never checked CEL syntax</td>
+<td>D1/D2 passed every check</td>
+<td>CI: every CEL literal terminated, every bracket balanced; tracker parity with the deletion policy; TTL windows; annotation contract across policy, scripts and Argo CD</td>
+<td><code>policy-ci.yaml</code></td>
+<td>CI (verified to fail on the old files)</td>
+</tr>
+</tbody></table>
+<h2>10. Guidelines</h2>
+<p><strong>Requesters</strong></p>
+<ul>
+<li>Open the request only when the change ticket is approved, and put the ticket first: <code>&quot;CHG0012345: reason&quot;</code>.</li>
+<li>Always use <code>request-deletion.sh</code>. It sets <code>delete-requested-at</code>, which the policy requires.</li>
+<li>If the reason changes, run <code>request-deletion.sh</code> again. This clears the approvals, as it must.</li>
+<li>If the deletion is no longer needed, cancel it. Do not let it expire.</li>
+</ul>
+<p><strong>Approvers</strong></p>
+<ul>
+<li>Act on <code>CriticalDeletionRequested</code>. Verify the ticket and that the object and cluster in the notification are the ones in the ticket, then run <code>approve-deletion.sh</code> from <strong>your own</strong> login.</li>
+<li>Never approve a request you opened, and never approve for someone else. The policy denies both.</li>
+<li>Before approving, check <code>status-deletion.sh</code>: an approval is valid for 4 h, so the second approver and the executor should be available within that window.</li>
+</ul>
+<p><strong>Executors</strong></p>
+<ul>
+<li>Run <code>execute-deletion.sh</code> only after <code>CriticalDeletionApproved … FULLY APPROVED</code>, and before <code>first_approval_expires</code>.</li>
+<li>You must not be one of the approvers; the policy checks this.</li>
+</ul>
+<p><strong>Platform owners</strong></p>
+<ul>
+<li>Change <code>minApprovers</code>, <code>approvalTTL</code> or <code>requestTTL</code> only by PR. CI refuses <code>minApprovers &lt; 2</code>, <code>approvalTTL &gt; requestTTL</code>, and reminder windows shorter than the TTLs.</li>
+<li>If you raise <code>requestTTL</code>, raise the <code>CriticalDeletionPendingApproval</code> window in the same PR.</li>
+<li>Keep the approvers&#39; distribution list in sync with the IdP group <code>gitops-deletion-approvers</code> (≥ 4 people, ≥ 2 teams).</li>
+<li>Review <code>list-pending-deletions.sh</code> weekly. Anything older than a day means the process is not being followed.</li>
+</ul>
+<p><strong>Do not</strong></p>
+<ul>
+<li>Write the annotations by hand in production (use the scripts).</li>
+<li>Put approvals on Tier-B kinds (namespaces, CRDs, OLM objects, Secrets, ServiceAccounts): those are Git or break-glass only (docs/09).</li>
+<li>Use <code>--as</code> to approve on someone&#39;s behalf: denied (docs/17) and alerted.</li>
+</ul>
+<h2>11. Rolling out these changes</h2>
+<ol>
+<li><strong>Drain in-flight requests first.</strong> Run <code>scripts/list-pending-deletions.sh</code> and finish or cancel every open request. Requests opened before this change have no <code>delete-requested-at</code>, so the upgraded reaper withdraws them at its next run, and the new V4 denies approvals on them.</li>
+<li><strong>Distribute the new scripts</strong> to requesters, approvers and executors before merging: in phase 3 the policy denies requests opened by the old <code>request-deletion.sh</code>, because they lack <code>delete-requested-at</code>.</li>
+<li><strong>Merge one PR with all files.</strong> Argo CD applies the CRD before the <code>GuardrailConfig</code> (a <code>requestTTL</code> value is kept only once the updated CRD schema is in place; until then the tracker and the reaper use their 24 h default).</li>
+<li><strong>Install the Alertmanager secret</strong> with the approvers receiver (§6.4), rendered from the vault.</li>
+<li><strong>Verify</strong> (§12) and run <code>scripts/test-guardrails.sh</code> on pre-prod (76 cases).</li>
+</ol>
+<p>Rollback: revert the PR. The tracker and the notifications are independent of the enforcement. Reverting the V4 change restores the previous contract; requests opened with <code>delete-requested-at</code> stay valid under the old policy, which ignores the extra annotation.</p>
+<h2>12. Verification</h2>
+<pre><code class="language-bash"># policies present; tracker never denies
+oc get validatingadmissionpolicy guardrails-critical-delete guardrails-deletion-tracker
+oc get validatingadmissionpolicybinding guardrails-deletion-tracker -o jsonpath=&#39;{.spec.validationActions}&#39;   # [&quot;Audit&quot;]
+oc get guardrailconfig default                  # columns include ApprovalTTL 4h, RequestTTL 24h
+
+# a request without delete-requested-at is denied (phase 3)
+oc -n guardrails-test annotate cm victim --overwrite &quot;guardrails.example.com/delete-request=CHG1: x&quot; \
+  &quot;guardrails.example.com/delete-requested-by=$(oc whoami)&quot;
+# -&gt; GUARDRAIL DENIED: invalid deletion request change ... delete-requested-at must be an RFC3339 UTC time ...
+
+# the tracker state for an object, from Loki
+logcli query --org-id=audit --since=24h \
+  &#39;{log_type=&quot;audit&quot;} |= &quot;guardrails-deletion-tracker/state&quot; | json | objectRef_name=&quot;victim&quot;
+   | line_format &quot;{{.annotations_guardrails_deletion_tracker_state}}&quot;&#39;
+
+# the reaper is running and withdrawing / expiring
+oc -n guardrails-system get cronjob approval-reaper
+oc -n guardrails-system logs job/$(oc -n guardrails-system get jobs -o name | tail -1 | cut -d/ -f2)
+# -&gt; reaper start approvalTTL=4h requestTTL=24h now=...
+#    pending configmaps guardrails-test/victim requested_at=... approvals=...
+</code></pre>
+<p>Tests: automated <code>scripts/test-guardrails.sh</code> §5 (missing or malformed <code>requested-at</code>), §6 (extending the request by refreshing <code>requested-at</code> is denied), §8 (reaper withdraws a request dated 2000-01-01); manual T4.17, T4.18, T6.3 to T6.5 in <code>docs/14</code>; traceability in <code>docs/16</code>.</p>
+<h2>13. Limitations</h2>
+<ul>
+<li><strong>Notifications depend on the audit pipeline.</strong> They are a convenience layered on the control, not the control. If Loki or the forwarder is down, requests still work and are still enforced; people fall back to <code>list-pending-deletions.sh</code>, and the pipeline outage is itself alerted.</li>
+<li><strong>Approval time is the approver&#39;s clock.</strong> The API server cannot verify it (CEL has no clock). The reaper bounds the damage: a future-dated entry lives at most about 10 minutes.</li>
+<li><strong>Tier-A kinds only.</strong> The reaper and the list script cover the kinds on which the workflow roles may write annotations. Tier-B kinds are break-glass only by design (docs/03).</li>
+<li><strong>Reminder queries scan up to 25 h of audit logs</strong> every 5 minutes, but only the lines that contain the tracker annotation, because of the line filter. On very large clusters, raise the group interval to 15 minutes.</li>
+</ul>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a></p>
+</main>
+<footer>Generated from <code>docs/19-deletion-approval-lifecycle.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

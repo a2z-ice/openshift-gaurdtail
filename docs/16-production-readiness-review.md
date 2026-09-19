@@ -79,6 +79,23 @@ Severity as assessed by the reviewers. **Fixed** = implemented in this repositor
 | L8 | Owners are all "platform-engineering". | **Accepted**: organisation-specific; fill in A2. |
 | L9 | `.claude/settings.json` denies `oc --as=` only as a prefix. | **Accepted**: defence in depth only; the alert is the control. |
 
+### Deletion-lifecycle review (2026-09-19, docs/19)
+
+Tracing one request through prevention, notification, counting and expiry found two compile-level defects that the earlier reviews and CI had missed, and six functional gaps. Full detail: docs/19 §9.
+
+| # | Finding | Resolution |
+|---|---|---|
+| D1 | **Critical.** `isOlmCsvReplacement` (vap-critical-delete) ended with a stray `"` inside a `>-` block: the CEL did not compile, so OLM could not replace the GitOps-operator CSV in phase 3. | **Fixed.** CI now checks every CEL literal and bracket (verified to fail on the old file). |
+| D2 | **Critical.** `isTrustedWriter` (vap-gitops-only-mutation) had the same defect: the always-Deny `-hardened` binding would have denied Argo CD's own updates to the policies and GuardrailConfig (no self-heal, no GitOps change to the guardrail). | **Fixed**, same CI check. |
+| G1 | Approvers were never notified directly (only an info alert to the platform channel, without counts). | **Fixed.** `guardrails-deletion-tracker` (records state, never denies) + Loki rules `CriticalDeletionRequested/Approved/ApprovalsExpired/RequestClosed` + route `audience="approvers"` → receiver `guardrail-approvers` (approvers' list + Teams channel). |
+| G2 | No view of "have / need / remaining". | **Fixed.** Tracker fields in every notification; `scripts/status-deletion.sh`, `scripts/list-pending-deletions.sh`; `show_state` marks expired, future-dated and invalid entries. |
+| G3 | Requests never expired and carried no time. | **Fixed.** `delete-requested-at` (required by V4, part of the request integrity), `requestTTL` 24 h, reaper withdraws stale/undated/future-dated requests with their approvals. |
+| G4 | No reminders for stuck requests. | **Fixed.** `CriticalDeletionPendingApproval`, `CriticalDeletionAwaitingExecution` (hourly). |
+| G5 | A stopped/suspended/missing reaper was not alerted. | **Fixed.** `GuardrailReaperNotRunning`. |
+| G6 | Concurrent approvals produced a confusing V3 denial. | **Fixed.** `approve-deletion.sh` writes with `--resource-version`. |
+| G8 | The reaper's GNU `date -d` accepted `""`, `now`, `yesterday` as timestamps (an `x\|now` approval would never expire). | **Fixed.** Strict RFC3339 check before parsing (reaper, `lib.sh`). |
+| G7 | CI did not check CEL syntax, tracker parity or TTL windows. | **Fixed.** Four new invariants in `policy-ci.yaml`. |
+
 ## 3. Test traceability matrix
 
 Every control has at least one automated case (A = section/case in `scripts/test-guardrails.sh`, which is phase-aware) or a manual case (M = T-number in `docs/14`), and the alert that proves detection. "verify" = `scripts/verify-install.sh`. Nothing is uncovered.
@@ -98,7 +115,13 @@ Every control has at least one automated case (A = section/case in `scripts/test
 | V1 break-glass exempt | – | T13 | BreakGlassUsed, decision `exempt=true` |
 | **V2** label removal denied | §3 | T3.2 | denied |
 | **V3** forged (admin writes 2), wrong name, own request, before request, malformed, smuggled data, duplicate, list replaced | §5, §6 | T4.1, T4.4, T4.6–T4.9, T4.12, T4.13 | denied |
-| V3 valid approvals append | §6 | T4.10, T4.14 | CriticalDeletionApprovalRecorded |
+| V3 valid approvals append | §6 | T4.10, T4.14 | CriticalDeletionApprovalRecorded, CriticalDeletionApproved |
+| **V4** request needs a valid `delete-requested-at`; refreshing it with approvals present is denied | §5, §6 | T4.17, T4.18 | denied |
+| Request lifetime: reaper withdraws a request older than `requestTTL` | §8 | T6.3 | CriticalDeletionRequestClosed (request-expired) |
+| Approval progress visible (have / need / remaining, expiries) | – | T6.4 | status-deletion.sh, list-pending-deletions.sh |
+| Approvers notified: request, each approval, expiry, closure, reminders | – | T6.5 | CriticalDeletion{Requested,Approved,ApprovalsExpired,RequestClosed,PendingApproval,AwaitingExecution} |
+| Reaper not running / suspended / missing | verify (CronJob present) | suspend the CronJob on pre-prod for 40 min | GuardrailReaperNotRunning |
+| CEL compiles (no unterminated literal or unbalanced bracket), tracker parity, TTL windows | CI | – | policy-ci invariants |
 | V3 reaper remove-only; cannot add | §8 | T6.2 | GuardrailReaperFailing (negative) |
 | **V4** request by someone else's name; developer outside groups; reason edited after approvals; cancel by third party | §5, §6, §7 | T4.2, T4.3, T4.16, T6.1 | denied / allowed |
 | **Label control** UPDATE by requester/admin denied, approver allowed; CREATE with label denied | §1 | T3.10 | denied |

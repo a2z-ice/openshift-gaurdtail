@@ -5,6 +5,7 @@ resources:
   - guardrailconfig-default.yaml
   - vap-critical-delete.yaml
   - vap-critical-delete-bindings.yaml
+  - vap-deletion-tracker.yaml
   - vap-critical-label-control.yaml
   - vap-impersonation-dry-run-only.yaml
   - vap-gitops-only-mutation.yaml

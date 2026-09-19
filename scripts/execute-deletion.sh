@@ -13,6 +13,7 @@ RAW="$(get_ann "$ANN_APPROVALS")"
 REQ_BY="$(get_ann "$ANN_REQUESTED_BY")"
 show_state
 COUNT=0; SEEN=" "
+# counts entries still present; show_state above marks expired ones (the reaper removes them within 10 min)
 if [[ -n "$RAW" ]]; then
   IFS=',' read -r -a ENTRIES <<< "$RAW"
   for e in "${ENTRIES[@]}"; do
@@ -23,6 +24,7 @@ if [[ -n "$RAW" ]]; then
 fi
 [[ $COUNT -lt $MIN ]] && { red "Only $COUNT distinct approvals, $MIN required. Deletion will be denied."; exit 1; }
 [[ -z "$REQ_BY" ]] && { red "No delete-request present. Deletion will be denied."; exit 1; }
+[[ -z "$(get_ann "$ANN_REQUESTED_AT")" ]] && { red "No delete-requested-at present (request opened with an old script?). Deletion will be denied; open a new request."; exit 1; }
 case "$RES" in
   namespace|namespaces|ns|project|projects|crd|customresourcedefinition|customresourcedefinitions*|secret|secrets|subscription*|clusterserviceversion*|csv|operatorgroup*)
     red "$RES is a Tier-B kind: not deletable through the workflow roles (break-glass only, see docs/09)."; exit 1 ;;

@@ -119,6 +119,23 @@ spec:
           annotations:
             summary: "Approval reaper job failed - expired approvals may linger"
             description: "oc logs -n guardrails-system job/{{ $labels.job_name }}"
+        - alert: GuardrailReaperNotRunning
+          expr: |
+            (time() - kube_cronjob_status_last_successful_time{namespace="guardrails-system", cronjob="approval-reaper"} > 1800)
+            or kube_cronjob_spec_suspend{namespace="guardrails-system", cronjob="approval-reaper"} == 1
+            or absent(kube_cronjob_info{namespace="guardrails-system", cronjob="approval-reaper"})
+          for: 10m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Approval reaper has not completed for 30 min, is suspended, or is missing"
+            description: >-
+              Without the reaper, approvals older than approvalTTL and requests older than requestTTL are NOT removed,
+              so an old approval could still satisfy the two-person rule. Check oc -n guardrails-system get cronjob approval-reaper
+              and the last job's logs; the CronJob is GitOps-only, so Argo CD self-heal should restore it.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#reaper-health
         - alert: LokiRulerDown
           expr: |
             absent(up{namespace="openshift-logging", job=~"logging-loki-ruler.*"}) or up{namespace="openshift-logging", job=~"logging-loki-ruler.*"} == 0

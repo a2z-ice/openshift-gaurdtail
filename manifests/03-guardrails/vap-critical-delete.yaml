@@ -18,7 +18,7 @@
 #                                     * an approval entry can only be appended by the
 #                                       approver it names, one at a time, with nothing
 #                                       else in the object changing in the same request
-#                                     * any change to the request text/author wipes approvals
+#                                     * any change to the request text/author/time wipes approvals
 #                                     * the reaper may only REMOVE entries
 #                                     * the critical label cannot be removed without the
 #                                       same approvals a deletion needs
@@ -29,6 +29,7 @@
 # Annotation contract (prefix guardrails.example.com/)
 #   delete-request        "<change-ticket>: <reason>"                (requester)
 #   delete-requested-by   "<username>"                               (requester; must equal caller)
+#   delete-requested-at   "<RFC3339 UTC>"                            (requester; request expires after requestTTL, reaper)
 #   delete-approvals      "<user>|<RFC3339 UTC>,<user>|<RFC3339 UTC>" (approvers; one entry per request)
 #
 # Phase   : 1 = validationActions [Audit]; 2 = [Warn, Audit]; 3 = [Deny, Audit]  (set on the bindings)
@@ -163,7 +164,7 @@ spec:
       expression: >-
         request.operation == 'DELETE' && request.resource.group == 'operators.coreos.com'
         && request.resource.resource == 'clusterserviceversions'
-        && request.userInfo.username in params.spec.olmServiceAccounts && variables.boundToken"
+        && request.userInfo.username in params.spec.olmServiceAccounts && variables.boundToken
     - name: isApprover
       expression: "variables.humanMarker && has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in params.spec.approverGroups)"
     - name: isRequester
@@ -177,6 +178,10 @@ spec:
       expression: "'guardrails.example.com/delete-requested-by' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-requested-by'] : ''"
     - name: newRequestedBy
       expression: "'guardrails.example.com/delete-requested-by' in variables.newAnn ? variables.newAnn['guardrails.example.com/delete-requested-by'] : ''"
+    - name: oldRequestedAt
+      expression: "'guardrails.example.com/delete-requested-at' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-requested-at'] : ''"
+    - name: newRequestedAt
+      expression: "'guardrails.example.com/delete-requested-at' in variables.newAnn ? variables.newAnn['guardrails.example.com/delete-requested-at'] : ''"
     - name: oldApprovalsRaw
       expression: "'guardrails.example.com/delete-approvals' in variables.oldAnn ? variables.oldAnn['guardrails.example.com/delete-approvals'] : ''"
     - name: newApprovalsRaw
@@ -194,13 +199,15 @@ spec:
     - name: approvalsUnchanged
       expression: "variables.newApprovalsRaw == variables.oldApprovalsRaw"
     - name: requestUnchanged
-      expression: "variables.newRequestedBy == variables.oldRequestedBy && variables.newRequest == variables.oldRequest"
+      expression: >-
+        variables.newRequestedBy == variables.oldRequestedBy && variables.newRequest == variables.oldRequest
+        && variables.newRequestedAt == variables.oldRequestedAt
     - name: oldApproversDistinct
       expression: "variables.oldApprovers.size() <= 32 && variables.oldApprovers.all(u, variables.oldApprovers.filter(x, x == u).size() == 1)"
     # ---- the two-person rule, evaluated on the PRE-request state
     - name: deletionApproved
       expression: >-
-        variables.oldRequestedBy != '' && variables.oldRequest != ''
+        variables.oldRequestedBy != '' && variables.oldRequest != '' && variables.oldRequestedAt != ''
         && variables.oldApprovers.size() >= params.spec.minApprovers
         && variables.oldApproversDistinct
         && !(variables.oldRequestedBy in variables.oldApprovers)
@@ -241,7 +248,7 @@ spec:
         'GUARDRAIL DENIED: deleting critical ' + request.resource.resource + ' '
         + (has(request.namespace) ? request.namespace + '/' : '') + request.name
         + ' requires a delete-request and at least ' + string(params.spec.minApprovers)
-        + ' distinct approvals from ' + params.spec.approverGroups.join(',')
+        + ' distinct approvals from ' + params.spec.approverGroups.join(',') + ' and a delete-requested-at time'
         + ' (found ' + string(variables.oldApprovers.size()) + ', requested-by=' + variables.oldRequestedBy
         + ', executor may not be an approver). Runbook: ' + params.spec.runbookURL
     # V2 - the critical label may not be removed unless a deletion would also have been allowed
@@ -264,7 +271,7 @@ spec:
              && variables.addedApprovals[0].matches('^[^|,]+\\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
              && variables.addedApprovals[0].split('|')[0] == request.userInfo.username
              && !(request.userInfo.username in variables.oldApprovers)
-             && variables.newRequestedBy != '' && variables.newRequest != ''
+             && variables.newRequestedBy != '' && variables.newRequest != '' && variables.newRequestedAt != ''
              && request.userInfo.username != variables.newRequestedBy
              && variables.requestUnchanged
              && variables.onlyGuardrailAnnotationsChanged )
@@ -273,19 +280,23 @@ spec:
         'GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by ' + request.userInfo.username
         + '. Rules: append exactly one entry "<your-username>|<RFC3339 UTC>", be a member of ' + params.spec.approverGroups.join(',')
         + ', not be the requester, not approve twice, change nothing else in the object. Clearing the annotation is always allowed.'
-    # V4 - request integrity (author == caller, author in requester groups, any change resets approvals, nothing else changes)
+    # V4 - request integrity (author == caller, author in requester groups, requested-at is an RFC3339 UTC time,
+    #      any change to request/author/time resets approvals, nothing else changes). Changing requested-at alone is a
+    #      request change, so a request cannot be kept alive past requestTTL without clearing its approvals.
     - expression: >-
         !variables.isCritical || variables.isExempt || request.operation != 'UPDATE'
         || variables.requestUnchanged
         || ( variables.newApprovals.size() == 0
              && variables.onlyGuardrailAnnotationsChanged
              && ( variables.newRequestedBy == ''
-                  || (variables.newRequestedBy == request.userInfo.username && variables.isRequester && variables.newRequest != '') ) )
+                  || (variables.newRequestedBy == request.userInfo.username && variables.isRequester && variables.newRequest != ''
+                      && variables.newRequestedAt.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')) ) )
       reason: Forbidden
       messageExpression: >-
         'GUARDRAIL DENIED: invalid deletion request change by ' + request.userInfo.username
         + '. delete-requested-by must equal your username, you must be in ' + (params.spec.requesterGroups + params.spec.approverGroups).join(',')
-        + ', delete-request must be non-empty, approvals must be empty when the request changes, and nothing else may change.'
+        + ', delete-request must be non-empty, delete-requested-at must be an RFC3339 UTC time (YYYY-MM-DDThh:mm:ssZ),'
+        + ' approvals must be empty when the request changes, and nothing else may change.'
   auditAnnotations:
     # Emitted for every evaluated request on a critical object, allowed or denied. Key in the audit event:
     #   annotations["guardrails-critical-delete/decision"]

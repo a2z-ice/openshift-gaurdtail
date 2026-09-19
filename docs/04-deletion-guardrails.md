@@ -15,17 +15,18 @@ The GitOps path is pre-approved: a change merged through the repository ruleset 
 
 ## Mechanism: approval on the target object
 
-A deletion needs three annotations on the object being deleted. Because they live **on the object**, the approval trail is in the audit log of that very object, no separate controller or CRD instance is needed, and the object disappears with its approvals when the deletion succeeds.
+A deletion needs four annotations on the object being deleted (the full lifecycle, notifications and lifetimes are in docs/19). Because they live **on the object**, the approval trail is in the audit log of that very object, no separate controller or CRD instance is needed, and the object disappears with its approvals when the deletion succeeds.
 
 | Annotation (`guardrails.example.com/`) | Written by | Content |
 |---|---|---|
 | `delete-request` | requester | `"<change-ticket>: <reason>"` |
 | `delete-requested-by` | requester | requester's own username (enforced) |
+| `delete-requested-at` | requester | RFC3339 UTC time the request was opened (enforced format; the request is withdrawn after `requestTTL`) |
 | `delete-approvals` | each approver, one at a time | `"<user>\|<RFC3339 UTC>,<user>\|<RFC3339 UTC>"` |
 
 Plus the marker that makes an object critical: label `guardrails.example.com/critical: "true"`. Objects that cannot be labelled reliably before installation (namespaces, CRDs, the policies themselves, groups, `APIServer/cluster`, the `ArgoCD` CR, OLM objects) are protected **by name** inside the policy (`variables.nameCritical`).
 
-Parameters (`GuardrailConfig/default`): `minApprovers` (2), `executorMayBeApprover` (false → three people), `approverGroups`, `requesterGroups`, `exemptUsers` (API-server loopback + break-glass SA), `reaperUsers`, `gitopsServiceAccounts`, `approvalTTL` (4h), `runbookURL`.
+Parameters (`GuardrailConfig/default`): `minApprovers` (2), `executorMayBeApprover` (false → three people), `approverGroups`, `requesterGroups`, `exemptUsers` (API-server loopback + break-glass SA), `reaperUsers`, `gitopsServiceAccounts`, `approvalTTL` (4h), `requestTTL` (24h), `runbookURL`.
 
 ## The policy, rule by rule (`manifests/03-guardrails/vap-critical-delete.yaml`)
 
@@ -36,9 +37,9 @@ All rules are evaluated on the **pre-request state** (`oldObject`), so nothing c
 | **V1** | DELETE | not critical, or caller exempt, or `deletionApproved` | every deletion without the two-person rule, by anyone |
 | **V2** | UPDATE | the `critical=true` label stays, or `deletionApproved` | "unlabel, then delete" |
 | **V3** | UPDATE | approvals unchanged; **or** cleared entirely (cancel); **or** reaper removing entries only; **or** exactly one entry appended whose user == caller, caller ∈ approver group, caller ∉ existing approvers, caller ≠ requester, a request exists, request unchanged, and nothing else in the object changed | forged/duplicate/third-party approvals, approving your own request, smuggling a spec change into an approval |
-| **V4** | UPDATE | request unchanged; **or** approvals empty and (request cleared, or requested-by == caller ∧ caller ∈ requester/approver groups ∧ reason non-empty) and nothing else changed | opening a request in someone else's name, editing the reason after approvals (which would let approvals apply to a different justification) |
+| **V4** | UPDATE | request (text, requested-by, requested-at) unchanged; **or** approvals empty and (request cleared, or requested-by == caller ∧ caller ∈ requester/approver groups ∧ reason non-empty ∧ requested-at is RFC3339 UTC) and nothing else changed | opening a request in someone else's name, editing the reason after approvals (which would let approvals apply to a different justification), an undated request, keeping a request alive by refreshing its time |
 
-`deletionApproved` := request present ∧ requested-by present ∧ `distinct(approvers) ≥ minApprovers` ∧ requester ∉ approvers ∧ (executor ∉ approvers unless `executorMayBeApprover`).
+`deletionApproved` := request present ∧ requested-by present ∧ requested-at present ∧ `distinct(approvers) ≥ minApprovers` ∧ requester ∉ approvers ∧ (executor ∉ approvers unless `executorMayBeApprover`).
 
 `auditAnnotations.decision` is stamped on every evaluated request (allowed or denied): `op=… user=… groups=… requestedBy=… approvers=… approved=… exempt=…`. The alerts key off it.
 
@@ -47,7 +48,7 @@ Design notes:
 - **`payloadUnchanged`** compares labels, `spec`, `data`, `binaryData`, `immutable`, `rules`, `aggregationRule`, `subjects`, `roleRef`, `users`, `webhooks`, Application `operation`, `metadata.finalizers` and `metadata.ownerReferences`; an approval write that touches any of them is denied.
 
 - **Exemptions are explicit**: `exemptUsers` (`system:apiserver`, the break-glass SA) and `gitopsControllers` (the two Argo CD controllers, the Git path). OLM may delete a superseded CSV during an operator upgrade (`olmServiceAccounts`, V1 clause). Not the garbage collector, not the namespace controller, not `argocd-server`. A controller whose delete is denied simply retries and the denial is alerted, which is the desired behaviour for a critical object.
-- **No clock in CEL** → TTL is enforced by the reaper CronJob (`reaper-cronjob.yaml`, every 10 min); the policy lets that identity only *remove* entries. The reaper also removes entries whose timestamp is more than 5 minutes in the **future** or unparseable, so an approver cannot extend an approval by writing a far-future time. Approvals are also wiped by V4 whenever the request changes.
+- **No clock in CEL** → both lifetimes (approvals: `approvalTTL`; the request itself: `requestTTL` from `delete-requested-at`) are enforced by the reaper CronJob (`reaper-cronjob.yaml`, every 10 min); the policy lets that identity only *remove* entries. The reaper also removes entries whose timestamp is more than 5 minutes in the **future** or unparseable, so an approver cannot extend an approval by writing a far-future time. Approvals are also wiped by V4 whenever the request changes.
 - **Binding A** (`-labelled`) uses `objectSelector` on the critical label. Kubernetes evaluates the selector against `object` **or** `oldObject`, so removing the label in the same request still matches (and V2 denies it). **Binding B** (`-named`) covers the name-protected, low-traffic kinds without a selector. Result: the policy costs nothing on the cluster's ordinary Secret/ConfigMap traffic.
 - **Fail closed where safe**: `failurePolicy: Fail`; the labelled binding has `parameterNotFoundAction: Deny`, the named binding `Allow`, because the named binding matches every namespace/CRD/cluster-RBAC/group/OLM update cluster-wide and a missing `GuardrailConfig` must not stop OLM or the namespace lifecycle. Its absence is alerted (its deletion is `GuardrailPolicyModified`) and `verify-install.sh` checks it.
 - **Type-checking warnings are expected**: `oc get vap guardrails-critical-delete -o yaml` lists warnings such as "undefined field 'spec'" because the policy matches many kinds; evaluation is dynamic. Only a `status.conditions` error or an "expression compile" message is a problem.
@@ -55,6 +56,8 @@ Design notes:
 ## Companion policies
 
 - `guardrails-impersonation-dry-run-only` – any CREATE/UPDATE/DELETE by an identity that lacks its authentication marker (humans: `scopes.authorization.openshift.io`; privileged SAs: `authentication.kubernetes.io/credential-id`) is denied unless `--dry-run=server`. Combined with RBAC that grants nobody `impersonate` on `userextras`, this makes `--as` a read/dry-run tool only. The deletion policy's own `isExempt`, `isGitOps`, `isReaper`, `isApprover` and `isRequester` variables require the same markers, so an impersonated exempt identity or approver is treated as an ordinary user even in a dry-run. Design: docs/17.
+
+- `guardrails-deletion-tracker` – never denies (`failurePolicy: Ignore`, binding `[Audit]` in every phase). Stamps `guardrails-deletion-tracker/state` (`event`, `have`, `need`, `remaining`, `ready`, request and approval expiry) into the audit event of every change to the delete-* annotations of a critical object; the approvers' notifications and reminders are built on it. Its `nameCritical` is a verbatim copy of this policy's (CI checks). Design: docs/19.
 
 - `guardrails-critical-label-control` – only `gitopsServiceAccounts`, `exemptUsers` or approver-group members may **add** the critical label (CREATE or UPDATE). Without it any tenant with `patch` on a protected kind could mark their own object critical to force the platform team into the workflow or wedge their namespace in Terminating. Bound with the same label `objectSelector`; follows the phase actions.
 
@@ -89,6 +92,7 @@ Without the scripts (what they do underneath):
 oc annotate -n openshift-gitops argocd openshift-gitops --overwrite \
   guardrails.example.com/delete-request="CHG0012345: migrate" \
   guardrails.example.com/delete-requested-by="$(oc whoami)" \
+  guardrails.example.com/delete-requested-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   guardrails.example.com/delete-approvals-
 # each approver appends only themself:
 CUR=$(oc get -n openshift-gitops argocd openshift-gitops -o go-template='{{index .metadata.annotations "guardrails.example.com/delete-approvals"}}')

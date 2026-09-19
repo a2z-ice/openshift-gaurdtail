@@ -40,6 +40,7 @@ rules:
       - guardrails-gitops-only-mutation
       - guardrails-gitops-only-mutation-hardened
       - guardrails-rbac-escalation-audit
+      - guardrails-deletion-tracker
       - guardrails-impersonation-dry-run-only
     verbs: ["get", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
@@ -98,6 +99,7 @@ rules:
       - guardrails-gitops-only-mutation
       - guardrails-gitops-only-mutation-hardened
       - guardrails-rbac-escalation-audit
+      - guardrails-deletion-tracker
       - guardrails-impersonation-dry-run-only
     verbs: ["get", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]

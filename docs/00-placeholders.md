@@ -10,7 +10,9 @@ Everything organisation-specific is a literal placeholder so a single search/rep
 | `approver1@example.com` … `auditor1@example.com` | Bootstrap group members | `manifests/00-namespaces-and-groups/groups.yaml` | Prefer IdP group sync; keep group names |
 | `platform-oncall@example.com`, `security-oncall@example.com`, `openshift-alerts@example.com` | Alert recipients / sender | `manifests/05-alerting/alertmanager-main.yaml` | |
 | `smtp.example.com:587` + `REPLACE_FROM_VAULT` | SMTP relay and password | `alertmanager-main.yaml` | password comes from the vault, never Git |
-| `https://REPLACE.logic.azure.com/...` | Teams Workflows webhook URL | `alertmanager-main.yaml` (2×) | see docs/06 §Teams |
+| `https://REPLACE.logic.azure.com/...` | Teams Workflows webhook URL (platform channel) | `alertmanager-main.yaml` (2×) | see docs/06 §Teams |
+| `.../workflows/REPLACE-APPROVERS/...` | Teams Workflows webhook URL of the **approvers'** channel (deletion desk) | `alertmanager-main.yaml` receiver `guardrail-approvers`; UWM alternative key `url-approvers` | docs/19 §6.4 |
+| `gitops-deletion-approvers@example.com` | approvers' email distribution list (mirror of the IdP group) | `alertmanager-main.yaml`, `alertmanagerconfig-uwm-alternative.yaml` | docs/19 §6.4 |
 | `prod-eu-1` | Cluster identifier label on every audit line | `manifests/01-audit/clusterlogforwarder-audit.yaml` | one per cluster |
 | `https://splunk-hec.example.com:8088`, index `openshift_audit`, secret `splunk-hec` | SIEM endpoint | `clusterlogforwarder-audit.yaml` | or swap to the Elasticsearch/syslog block |
 | `gp3-csi` | Storage class for LokiStack PVCs | `manifests/01-audit/lokistack.yaml` | RWO, SSD |

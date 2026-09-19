@@ -42,7 +42,7 @@ const page = (s, body) => `<!DOCTYPE html>
 <script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
 </head><body>
 <header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
-<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
 <main>
 ${body}

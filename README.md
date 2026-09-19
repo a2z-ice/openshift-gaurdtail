@@ -73,7 +73,7 @@ sequenceDiagram
     participant API as kube-apiserver + VAP
     participant AM as Alertmanager
     R->>API: annotate delete-request and delete-requested-by = own username
-    API-->>AM: info CriticalDeletionApprovalRecorded
+    API-->>AM: info CriticalDeletionRequested to the approvers channel
     A1->>API: append delete-approvals entry approver1|timestamp
     Note over API: CEL checks: entry names the caller, caller in approver group,<br/>caller is not the requester, nothing else changed
     A2->>API: append delete-approvals entry approver2|timestamp
@@ -93,7 +93,7 @@ docs/                       numbered design + operations documents (start with 0
 manifests/base/             phase-3 (enforce) definitions, kustomize
 manifests/overlays/phaseN   audit-only → warn → enforce → gitops-only (Argo CD points here)
 manifests/0X-*/             one directory per layer, every file has a header: purpose, phase, rollback
-scripts/                    request/approve/execute/cancel a deletion, verify-install, test matrix, audit query
+scripts/                    request/approve/execute/cancel/status/list-pending deletions, verify-install, test matrix, audit query
 .github/                    CODEOWNERS, ruleset (2 approvals, no bypass), policy CI
 ```
 
@@ -149,5 +149,6 @@ Any LLM tool can operate this repository with a few hundred tokens of context:
 | 16 | [Production readiness review](docs/16-production-readiness-review.md) | independent audit findings, what was fixed, and the 100 % test traceability matrix |
 | 17 | [Impersonation control](docs/17-impersonation-control.md) | `--as` works only for reads, access reviews and dry-runs; how admission tells a real session from an impersonated one |
 | 18 | [The story](docs/18-the-story.md) | Narrative for leaders and engineers: what the project solves, why and how, every layer and file with what it solves, roles, rollout and decisions to approve |
+| 19 | [Deletion approval lifecycle](docs/19-deletion-approval-lifecycle.md) | how accidental deletion is prevented, how approvers are notified, how the system counts approvals and remaining ones, how long requests and approvals live; defects and gaps fixed |
 | – | [HTML portal](html/index.html) | entry point with summary and navigation to the study guide and HTML versions of every document (`node scripts/build-html-docs.mjs` regenerates `html/docs/`) |
 | – | [Study guide (HTML)](html/study-guide.html) | complete technical study material, foundations to corner cases, with the gap-fix implementations |

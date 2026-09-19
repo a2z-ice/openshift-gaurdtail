@@ -415,9 +415,11 @@ onlyGuardrailAnnotationsChanged = labels equal && spec/data/rules/subjects/roleR
               validation_failure=[{policy: guardrails-critical-delete, binding: -named, ...}]
  Loki rule CriticalResourceDeleteDenied → Alertmanager → Teams (warning)</div>
 <h4>Trace B — the full workflow on a labelled ConfigMap</h4>
-<div class="diagram">1 req@example.com  annotate delete-request="CHG1: x" delete-requested-by=req@example.com delete-approvals-
+<p>Since 2026-09-19 a request also carries <code>delete-requested-at</code> and expires after <code>requestTTL</code> (24 h); approvers are notified with "approval N of M, remaining" by the recording-only policy <code>guardrails-deletion-tracker</code>. The full lifecycle, with diagrams and the responsible code, is in <a href="docs/19-deletion-approval-lifecycle.html">docs/19</a>.</p>
+<div class="diagram">1 req@example.com  annotate delete-request="CHG1: x" delete-requested-by=req@example.com delete-requested-at=2026-09-18T10:15:00Z delete-approvals-
     V3: approvals '' → '' unchanged ✓     V4: requestUnchanged=false → approvals empty ✓, only guardrail ann changed ✓,
-        newRequestedBy == caller ✓, isRequester ✓, reason non-empty ✓  → allowed (200)
+        newRequestedBy == caller ✓, isRequester ✓, reason non-empty ✓, requested-at RFC3339 ✓  → allowed (200)
+    tracker: state event=requested have=0 need=2 remaining=2 → CriticalDeletionRequested to the approvers' channel
 2 a1@example.com   annotate delete-approvals="a1@example.com|2026-09-18T10:20:31Z"
     V3: added=1 removed=0 size old+1 ✓ isApprover ✓ regex ✓ names caller ✓ not already ✓ request exists ✓ not requester ✓ unchanged ✓ → 200
 3 req@example.com  delete       → V1: approvers=1 &lt; 2 → 403 "found 1"

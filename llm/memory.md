@@ -21,3 +21,4 @@
 ## State log (phase changes, test runs, drills; format: date | cluster | event | evidence)
 - 2026-09-18 | none | repository created, kustomize/yamllint/bash -n pass locally | local
 - 2026-09-18 | none | gap fixes: critical-label-control policy, reaper rejects future timestamps, Argo CD server/appset/operator SAs trusted, 07-hardening-extras added (60 objects per overlay) | local
+- 2026-09-19: Deletion lifecycle (docs/19): fixed CEL compile defects D1 (isOlmCsvReplacement) and D2 (isTrustedWriter, broke hardened-binding self-heal) - stray `"` in `>-` blocks; CI now checks CEL literals/brackets. Added `delete-requested-at` (V4-required), `requestTTL` 24h, reaper withdraws stale requests, `guardrails-deletion-tracker` (never denies) + approvers notifications/reminders (`audience="approvers"`), `GuardrailReaperNotRunning`, status/list scripts. 91 objects/overlay, 6 policies, 41 alerts, 76 automated cases. Not yet run on a cluster.

@@ -49,6 +49,7 @@ spec:
       jsonPointers:
         - /metadata/annotations/guardrails.example.com~1delete-request
         - /metadata/annotations/guardrails.example.com~1delete-requested-by
+        - /metadata/annotations/guardrails.example.com~1delete-requested-at
         - /metadata/annotations/guardrails.example.com~1delete-approvals
     - group: user.openshift.io
       kind: Group

@@ -4,7 +4,7 @@
 <script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
 </head><body>
 <header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
-<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
 <main>
 <h1>14 · Manual test guide</h1>
@@ -166,7 +166,7 @@ $ as-a1 patch group platform-admins --type merge -p &#39;{&quot;users&quot;:[&qu
 → Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...
 $ as-a1 -n guardrails-system patch cronjob approval-reaper --type merge -p &#39;{&quot;spec&quot;:{&quot;jobTemplate&quot;:{&quot;spec&quot;:{&quot;template&quot;:{&quot;spec&quot;:{&quot;serviceAccountName&quot;:&quot;breakglass&quot;}}}}}}&#39; --dry-run=server
 → Error from server (Forbidden): ... binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request ...
-$ as-a1 annotate guardrailconfig default $PFX/delete-request=&quot;CHG-x: rehearsal&quot; $PFX/delete-requested-by=a1@example.com --overwrite --dry-run=server
+$ as-a1 annotate guardrailconfig default $PFX/delete-request=&quot;CHG-x: rehearsal&quot; $PFX/delete-requested-by=a1@example.com $PFX/delete-requested-at=$(ts) --overwrite --dry-run=server
 → guardrailconfig.guardrails.example.com/default annotated (server dry run)            (approval annotations remain allowed)
 </code></pre>
 <pre><code class="language-bash">$ as-admin delete validatingadmissionpolicybinding guardrails-critical-delete-named --dry-run=server
@@ -214,11 +214,11 @@ EOF2
 → Error from server (Forbidden): ... denied request: GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by admin@example.com. Rules: append exactly one entry &quot;&lt;your-username&gt;|&lt;RFC3339 UTC&gt;&quot;, be a member of gitops-deletion-approvers, not be the requester, not approve twice, change nothing else in the object. Clearing the annotation is always allowed.
 </code></pre>
 <p><strong>T4.2 – request opened in someone else&#39;s name.</strong></p>
-<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: test&quot; &quot;$PFX/delete-requested-by=a1@example.com&quot;
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: test&quot; &quot;$PFX/delete-requested-by=a1@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot;
 → Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change by req@example.com. delete-requested-by must equal your username, you must be in gitops-deletion-requesters,gitops-operators,gitops-deletion-approvers, delete-request must be non-empty, approvals must be empty when the request changes, and nothing else may change.
 </code></pre>
 <p><strong>T4.3 – request by someone outside the requester/approver groups</strong> (use any ordinary user, e.g. <code>dev@example.com</code> with <code>patch</code> rights via a test RoleBinding, or skip if none).</p>
-<pre><code class="language-bash">$ KUBECONFIG=~/.kube/dev.kubeconfig oc -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: x&quot; &quot;$PFX/delete-requested-by=dev@example.com&quot;
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/dev.kubeconfig oc -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: x&quot; &quot;$PFX/delete-requested-by=dev@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot;
 → Error from server (Forbidden): ... invalid deletion request change by dev@example.com ...   (or an RBAC Forbidden if the user has no patch rights: also a pass)
 </code></pre>
 <p><strong>T4.4 – approval before any request exists.</strong></p>
@@ -226,13 +226,14 @@ EOF2
 → Error from server (Forbidden): ... GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by a1@example.com ...
 </code></pre>
 <p><strong>T4.5 – a valid request (positive).</strong></p>
-<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: guardrail test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot;
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: guardrail test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot;
 → configmap/victim annotated
 $ state victim
 → guardrails.example.com/delete-request=CHG1: guardrail test
   guardrails.example.com/delete-requested-by=req@example.com
+  guardrails.example.com/delete-requested-at=2026-09-19T08:00:00Z
 </code></pre>
-<p>Teams: <code>CriticalDeletionApprovalRecorded</code> (info, batched up to 1 min).</p>
+<p>Teams: <code>CriticalDeletionApprovalRecorded</code> (info, platform channel, batched up to 1 min) and <code>CriticalDeletionRequested</code> in the <strong>approvers&#39;</strong> channel and mailbox (T6.5).</p>
 <p><strong>T4.6 – requester approves own request.</strong></p>
 <pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-approvals=req@example.com|$(ts)&quot;
 → Error from server (Forbidden): ... invalid change to guardrails.example.com/delete-approvals by req@example.com ...
@@ -290,6 +291,18 @@ $ as-admin -n $NS delete rolebinding test-a1-exec
 $ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: changed my mind&quot;
 → Error from server (Forbidden): ... invalid deletion request change by req@example.com ... approvals must be empty when the request changes ...
 </code></pre>
+<p><strong>T4.17 – a request without, or with a malformed, <code>delete-requested-at</code> is rejected.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: x&quot; &quot;$PFX/delete-requested-by=req@example.com&quot;
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change by req@example.com ... delete-requested-at must be an RFC3339 UTC time ...
+$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-request=CHG1: x&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=yesterday&quot;
+→ Error from server (Forbidden): ... same message
+</code></pre>
+<p><strong>T4.18 – a request cannot be kept alive by refreshing its time while approvals exist.</strong></p>
+<pre><code class="language-bash"># after T4.10 (one approval present)
+$ as-req -n $NS annotate configmap victim --overwrite &quot;$PFX/delete-requested-at=$(ts)&quot;
+→ Error from server (Forbidden): ... GUARDRAIL DENIED: invalid deletion request change ... approvals must be empty when the request changes ...
+</code></pre>
+<p>(Opening the request again with <code>request-deletion.sh</code> is allowed: it clears the approvals in the same write.)</p>
 <h2>5. The happy path ★</h2>
 <p><strong>T5.1 – executor deletes with two approvals.</strong></p>
 <pre><code class="language-bash">$ as-req -n $NS delete configmap victim
@@ -322,15 +335,15 @@ $ KUBECONFIG=~/.kube/req.kubeconfig scripts/execute-deletion.sh configmap victim
 <h2>6. Cancel and expiry ★</h2>
 <p><strong>T6.1 – cancel clears everything; delete after cancel is denied.</strong></p>
 <pre><code class="language-bash">$ as-admin -n $NS create configmap victim2 --from-literal=a=b &amp;&amp; as-admin -n $NS label configmap victim2 $PFX/critical=true
-$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG3: cancel test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot;
+$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG3: cancel test&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot;
 $ as-a1  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
-$ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request-&quot; &quot;$PFX/delete-requested-by-&quot; &quot;$PFX/delete-approvals-&quot;
+$ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request-&quot; &quot;$PFX/delete-requested-by-&quot; &quot;$PFX/delete-requested-at-&quot; &quot;$PFX/delete-approvals-&quot;
 → configmap/victim2 annotated              (anyone with patch rights may cancel; cancelling never makes deletion easier)
 $ as-req -n $NS delete configmap victim2
 → Error from server (Forbidden): ... GUARDRAIL DENIED: ... (found 0, requested-by=, ...)
 </code></pre>
 <p><strong>T6.2 – the reaper removes expired AND future-dated approvals and cannot add any.</strong></p>
-<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG4: reaper&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-approvals-&quot;
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-request=CHG4: reaper&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot; &quot;$PFX/delete-approvals-&quot;
 $ as-a1  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=a1@example.com|2000-01-01T00:00:00Z&quot;       # expired
 → configmap/victim2 annotated
 $ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approvals=$(approvals victim2),a2@example.com|2099-01-01T00:00:00Z&quot;   # future-dated
@@ -338,10 +351,11 @@ $ as-a2  -n $NS annotate configmap victim2 --overwrite &quot;$PFX/delete-approva
 $ as-admin -n guardrails-system create job reaper-manual --from=cronjob/approval-reaper
 $ as-admin -n guardrails-system wait --for=condition=complete job/reaper-manual --timeout=120s
 $ as-admin -n guardrails-system logs job/reaper-manual
-→ reaper start ttl=4h (14400s) now=...
+→ reaper start approvalTTL=4h requestTTL=24h now=...
   expire configmaps guardrails-test/victim2 approver=a1@example.com at=2000-01-01T00:00:00Z (ttl or future/invalid timestamp)
   expire configmaps guardrails-test/victim2 approver=a2@example.com at=2099-01-01T00:00:00Z (ttl or future/invalid timestamp)
   configmap/victim2 annotated
+  pending configmaps guardrails-test/victim2 requested_at=... approvals=&lt;none&gt;
   reaper done
 $ state victim2 | grep approvals
 → (no output: both entries removed)
@@ -350,6 +364,62 @@ $ as-admin --as=system:serviceaccount:guardrails-system:approval-reaper -n $NS a
 $ as-admin -n guardrails-system delete job reaper-manual
 </code></pre>
 <p>(The <code>--as</code> in the last step raises <code>ImpersonationUsed</code>; expected during testing.)</p>
+<p><strong>T6.3 – the reaper withdraws a request older than <code>requestTTL</code> (and its approvals).</strong></p>
+<pre><code class="language-bash">$ as-admin -n $NS create configmap victim3 --from-literal=a=b &amp;&amp; as-a1 -n $NS label configmap victim3 $PFX/critical=true
+$ as-req -n $NS annotate configmap victim3 --overwrite &quot;$PFX/delete-request=CHG5: stale&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=2000-01-01T00:00:00Z&quot;
+$ as-a1  -n $NS annotate configmap victim3 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+$ as-admin -n guardrails-system create job reaper-manual2 --from=cronjob/approval-reaper &amp;&amp; as-admin -n guardrails-system wait --for=condition=complete job/reaper-manual2 --timeout=120s
+$ as-admin -n guardrails-system logs job/reaper-manual2 | grep victim3
+→ withdraw configmaps guardrails-test/victim3 requested_at=2000-01-01T00:00:00Z (requestTTL exceeded, undated, invalid or future-dated)
+$ state victim3
+→ (no output: request, requested-by, requested-at and approvals all removed)
+</code></pre>
+<p>Approvers&#39; channel: <code>CriticalDeletionRequestClosed</code> with <code>event=request-expired</code>.</p>
+<p><strong>T6.4 – progress and memory are visible.</strong></p>
+<pre><code class="language-bash">$ as-req -n $NS annotate configmap victim3 --overwrite &quot;$PFX/delete-request=CHG6: status&quot; &quot;$PFX/delete-requested-by=req@example.com&quot; &quot;$PFX/delete-requested-at=$(ts)&quot;
+$ as-a1  -n $NS annotate configmap victim3 --overwrite &quot;$PFX/delete-approvals=a1@example.com|$(ts)&quot;
+$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/status-deletion.sh configmap victim3 -n $NS
+→ requested-at : 2026-09-19T...Z  -&gt; expires 2026-09-20T...Z (1439 min left)
+  approvals    : a1@example.com|2026-09-19T...Z
+                 - a1@example.com  at ...  -&gt; valid until ... (239 min left)
+  progress     : 1 of 2 valid approvals -&gt; 1 more approval(s) needed
+$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/list-pending-deletions.sh
+→ configmaps  guardrails-test/victim3  req@example.com  2026-09-19T...Z  1/2  1
+</code></pre>
+<p><strong>T6.5 – the approvers are notified, with counts, and reminded.</strong> Continue from T6.4 and watch the approvers&#39; Teams channel and mailbox (docs/19 §6):</p>
+<table>
+<thead>
+<tr>
+<th>Time</th>
+<th>Expected message (approvers&#39; channel only, not the on-call)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>≤ 60 s after the request in T6.4</td>
+<td><code>APPROVAL NEEDED: req@example.com requests deletion of configmaps guardrails-test/victim3</code>, 2 approvals needed, request expiry</td>
+</tr>
+<tr>
+<td>≤ 60 s after a1&#39;s approval</td>
+<td><code>Approval 1 of 2 recorded by a1@example.com ... - 1 remaining</code>, oldest approval expiry</td>
+</tr>
+<tr>
+<td>≈ 15–20 min with no further action</td>
+<td><code>REMINDER: ... waiting for 1 more approval(s)</code>, repeated hourly</td>
+</tr>
+<tr>
+<td>≤ 60 s after a2 approves (<code>scripts/approve-deletion.sh configmap victim3 -n $NS</code> as a2)</td>
+<td><code>Approval 2 of 2 ... - FULLY APPROVED</code></td>
+</tr>
+<tr>
+<td>≈ 30–35 min without execution</td>
+<td><code>... fully approved but not executed yet</code></td>
+</tr>
+<tr>
+<td>≤ 60 s after <code>scripts/cancel-deletion.sh configmap victim3 -n $NS</code></td>
+<td><code>Deletion request on ... closed: cancelled</code>; both reminders resolve within 5 min</td>
+</tr>
+</tbody></table>
+<p>Evidence: screenshots of the Teams posts, the email headers, and <code>logcli query --org-id=audit &#39;{log_type=&quot;audit&quot;} |= &quot;guardrails-deletion-tracker/state&quot; | json | objectRef_name=&quot;victim3&quot; | line_format &quot;{{.annotations_guardrails_deletion_tracker_state}}&quot;&#39;</code>.</p>
 <h2>7. The GitOps path is pre-approved; the Argo CD UI is not ★</h2>
 <p><strong>T7.1 – a manifest removed from Git IS pruned (Git ruleset = approval) and alerted for PR correlation.</strong></p>
 <ol>
@@ -673,7 +743,7 @@ $ as-admin get ns $NS
 </tbody></table>
 <p>Sign-off requires every row filled, zero unexpected results, and the evidence attached to the change ticket for the next phase.</p>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a></p>
 </main>
 <footer>Generated from <code>docs/14-manual-test-guide.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

@@ -76,6 +76,60 @@ jobs:
                               fail.append(f"{d['metadata']['name']} grants escalate/bind or * verbs")
           if cfg.get('humanAuthExtraKey', 'x') == '' : fail.append('humanAuthExtraKey is empty (needs a written decision)')
           if cfg.get('requireBoundTokenForPrivileged', True) is False: fail.append('requireBoundTokenForPrivileged is false')
+          # ---- CEL: every string literal terminated and every bracket balanced (catches a stray quote that
+          #      YAML accepts but the API server rejects at compile time, e.g. a trailing " in a >- block)
+          def cel_ok(e):
+              i, depth, pairs = 0, [], {')': '(', ']': '[', '}': '{'}
+              while i < len(e):
+                  c = e[i]
+                  if c in '\'"':
+                      i += 1
+                      while i < len(e) and e[i] != c:
+                          i += 2 if e[i] == '\\' else 1
+                      if i >= len(e): return 'unterminated string literal'
+                  elif c in '([{': depth.append(c)
+                  elif c in ')]}':
+                      if not depth or depth.pop() != pairs[c]: return 'unbalanced ' + c
+                  i += 1
+              return 'unclosed bracket' if depth else None
+          def walk(o, where):
+              if isinstance(o, dict):
+                  for k, v in o.items():
+                      if k in ('expression', 'valueExpression', 'messageExpression') and isinstance(v, str):
+                          err = cel_ok(v)
+                          if err: fail.append(f"CEL {where}/{o.get('name', o.get('key', k))}: {err}")
+                      else: walk(v, where)
+              elif isinstance(o, list):
+                  for x in o: walk(x, where)
+          for f in glob.glob('manifests/**/*.yaml', recursive=True):
+              for d in yaml.safe_load_all(open(f)):
+                  if d and d.get('kind') == 'ValidatingAdmissionPolicy': walk(d, f)
+          # ---- deletion tracker: never enforces, and sees exactly what the deletion policy protects
+          delp = next(yaml.safe_load_all(open('manifests/03-guardrails/vap-critical-delete.yaml')))['spec']
+          trk = list(yaml.safe_load_all(open('manifests/03-guardrails/vap-deletion-tracker.yaml')))
+          tp, tb = trk[0]['spec'], trk[1]['spec']
+          var = lambda sp, n: next(v['expression'] for v in sp['variables'] if v['name'] == n)
+          if tp.get('validations'): fail.append('guardrails-deletion-tracker must not have validations')
+          if tp['failurePolicy'] != 'Ignore': fail.append('guardrails-deletion-tracker must be failurePolicy Ignore')
+          if tb['validationActions'] != ['Audit']: fail.append('guardrails-deletion-tracker binding must be [Audit]')
+          if var(tp, 'nameCritical') != var(delp, 'nameCritical'): fail.append('tracker nameCritical differs from guardrails-critical-delete')
+          if tp['matchConstraints'] != delp['matchConstraints']: fail.append('tracker matchConstraints differ from guardrails-critical-delete')
+          # ---- lifetimes: approvalTTL <= requestTTL <= reminder window; approvalTTL <= awaiting-execution window
+          sec = lambda v: int(v[:-1]) * (3600 if v.endswith('h') else 60)
+          if sec(cfg['approvalTTL']) > sec(cfg.get('requestTTL', '24h')): fail.append('approvalTTL must be <= requestTTL')
+          loki = yaml.safe_load(open('manifests/05-alerting/loki-alertingrules-audit.yaml'))
+          import re as _re
+          win = {r['alert']: sec(_re.search(r'\[(\d+[hm])\]', r['expr']).group(1)) for g in loki['spec']['groups'] for r in g['rules'] if g['name'] == 'guardrails.approvals.reminders'}
+          if win.get('CriticalDeletionPendingApproval', 0) < sec(cfg.get('requestTTL', '24h')): fail.append('CriticalDeletionPendingApproval window < requestTTL')
+          if win.get('CriticalDeletionAwaitingExecution', 0) < sec(cfg['approvalTTL']): fail.append('CriticalDeletionAwaitingExecution window < approvalTTL')
+          # ---- annotation contract: policy, scripts and Argo CD ignoreDifferences agree
+          keys = ['delete-request', 'delete-requested-by', 'delete-requested-at', 'delete-approvals']
+          lib = open('scripts/lib.sh').read(); appf = open('manifests/04-argocd/application-guardrails.yaml').read()
+          vapf = open('manifests/03-guardrails/vap-critical-delete.yaml').read()
+          for k in keys:
+              if f'guardrails.example.com/{k}' not in vapf: fail.append(f'policy does not use {k}')
+              if f'/{k}"' not in lib: fail.append(f'scripts/lib.sh lacks {k}')
+              if f'guardrails.example.com~1{k}\n' not in appf: fail.append(f'Argo CD ignoreDifferences lacks {k}')
           app = yaml.safe_load(open('manifests/04-argocd/application-guardrails.yaml'))
           if app['metadata'].get('finalizers'): fail.append('guardrails Application must not carry a cascade finalizer')
           if not app['spec']['syncPolicy']['automated'].get('selfHeal'): fail.append('selfHeal must be true')

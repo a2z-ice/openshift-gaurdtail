@@ -20,9 +20,14 @@ if [[ "$AUTO" != "true" ]]; then
   read -r -p "Approve deletion of $RES/$NAME as $ME? Type 'approve' to continue: " CONFIRM
   [[ "$CONFIRM" == "approve" ]] || { yellow "aborted"; exit 1; }
 fi
-TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CUR="$(get_ann "$ANN_APPROVALS")"
+TS="$(utc_now)"
+# read value and resourceVersion together; --resource-version makes a concurrent approval a clean conflict
+# (retry) instead of a policy denial for "dropping" the other approver's entry
+STATE="$(oc get ${NSARGS[@]+"${NSARGS[@]}"} "$RES" "$NAME" -o go-template="{{.metadata.resourceVersion}}|{{with .metadata.annotations}}{{with index . \"$ANN_APPROVALS\"}}{{.}}{{end}}{{end}}")"
+RV="${STATE%%|*}"; CUR="${STATE#*|}"
 NEW="${CUR:+${CUR},}${ME}|${TS}"
-oc annotate ${NSARGS[@]+"${NSARGS[@]}"} "$RES" "$NAME" --overwrite "${ANN_APPROVALS}=${NEW}"
-green "Approval recorded at $TS"
+if ! oc annotate ${NSARGS[@]+"${NSARGS[@]}"} "$RES" "$NAME" --overwrite --resource-version="$RV" "${ANN_APPROVALS}=${NEW}"; then
+  red "Approval not recorded (another approval landed at the same time, or the policy denied it). Re-run to retry."; exit 1
+fi
+green "Approval recorded at $TS (valid for $(approval_ttl)). The approvers channel is notified (CriticalDeletionApproved)."
 show_state

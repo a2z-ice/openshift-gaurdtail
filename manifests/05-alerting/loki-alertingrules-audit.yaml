@@ -396,3 +396,139 @@ spec:
           annotations:
             summary: "{{ $labels.user_username }} opened a shell on a control-plane pod/node ({{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }})"
             description: "Node-level access (oc debug node, etcd exec) is the only way around the admission guardrail. Must map to an open incident."
+    # ---- Approver notifications and workflow memory (docs/19). Source: the audit annotation stamped by
+    #      guardrails-deletion-tracker on every change to the delete-* annotations of a critical object.
+    #      audience="approvers" routes these to the approvers' email list and Teams channel (alertmanager-main).
+    - name: guardrails.approvals
+      interval: 30s
+      rules:
+        - alert: CriticalDeletionRequested
+          expr: |
+            sum by (objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster, requested_by, need, requested_at, request_expires, req) (
+              count_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | event="requested"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "APPROVAL NEEDED: {{ $labels.requested_by }} requests deletion of {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}"
+            description: >-
+              Reason: {{ $labels.req }}. {{ $labels.need }} approvals from gitops-deletion-approvers are needed (not the requester). The request expires at {{ $labels.request_expires }}. Review the change ticket, then approve with: scripts/approve-deletion.sh {{ $labels.objectRef_resource }} {{ $labels.objectRef_name }}{{ if $labels.objectRef_namespace }} -n {{ $labels.objectRef_namespace }}{{ end }}
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#notification-1-request-opened
+        - alert: CriticalDeletionApproved
+          expr: |
+            sum by (objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster, actor, have, need, remaining, ready, approvers, first_approval_expires, requested_by) (
+              count_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | event="approved"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "Approval {{ $labels.have }} of {{ $labels.need }} recorded by {{ $labels.actor }} for {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}{{ if eq $labels.remaining \"0\" }} - FULLY APPROVED{{ else }} - {{ $labels.remaining }} remaining{{ end }}"
+            description: >-
+              Approvers so far: {{ $labels.approvers }} (requested by {{ $labels.requested_by }}). {{ if eq $labels.remaining "0" }}A third person (not an approver) may now run scripts/execute-deletion.sh before {{ $labels.first_approval_expires }}, when the oldest approval expires.{{ else }}{{ $labels.remaining }} more approval(s) needed; the oldest approval expires at {{ $labels.first_approval_expires }}.{{ end }}
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#notification-2-approval-recorded
+        - alert: CriticalDeletionApprovalsExpired
+          expr: |
+            sum by (objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster, have, need, remaining, requested_by) (
+              count_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | event="expired"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "Approvals EXPIRED on {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }}: {{ $labels.have }} of {{ $labels.need }} left"
+            description: >-
+              The approval reaper removed approvals older than approvalTTL (or future-dated). {{ $labels.remaining }} approval(s) are needed again before the deletion can be executed. The request by {{ $labels.requested_by }} stays open until it is cancelled or reaches requestTTL.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#notification-3-approval-expired
+        - alert: CriticalDeletionRequestClosed
+          expr: |
+            sum by (objectRef_resource, objectRef_namespace, objectRef_name, openshift_labels_cluster, event, actor, requested_by) (
+              count_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | event=~"cancelled|request-expired|approvals-cleared|executed"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "Deletion request on {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} closed: {{ $labels.event }}"
+            description: >-
+              {{ if eq $labels.event "executed" }}Deleted by {{ $labels.actor }} after approval (see CriticalResourceDeleted).{{ else if eq $labels.event "request-expired" }}Withdrawn by the approval reaper: requestTTL exceeded (or the request time was missing, invalid or in the future). Open a new request if the deletion is still needed.{{ else if eq $labels.event "cancelled" }}Cancelled by {{ $labels.actor }}. No action needed.{{ else }}All approvals were cleared by {{ $labels.actor }}; the request by {{ $labels.requested_by }} is still open and needs approvals again.{{ end }}
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#notification-4-request-closed
+    # ---- Reminders: the LAST recorded state of each object inside the window. The window of
+    #      CriticalDeletionPendingApproval must be >= GuardrailConfig.spec.requestTTL (+1h margin), and the window of
+    #      CriticalDeletionAwaitingExecution >= approvalTTL (+1h); CI checks both. Alertmanager repeats every hour.
+    - name: guardrails.approvals.reminders
+      interval: 5m
+      rules:
+        - alert: CriticalDeletionPendingApproval
+          expr: |
+            last_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | unwrap remaining | __error__=""
+              [25h]
+            ) by (objectRef_resource, objectRef_namespace, objectRef_name) > 0
+          for: 15m
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "REMINDER: deletion of {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} is waiting for {{ $value }} more approval(s)"
+            description: >-
+              Open request, not yet fully approved. Show the full state with scripts/status-deletion.sh {{ $labels.objectRef_resource }} {{ $labels.objectRef_name }}{{ if $labels.objectRef_namespace }} -n {{ $labels.objectRef_namespace }}{{ end }} and approve with scripts/approve-deletion.sh, or cancel with scripts/cancel-deletion.sh if it is no longer needed. The reaper withdraws the request at requestTTL.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#reminders
+        - alert: CriticalDeletionAwaitingExecution
+          expr: |
+            last_over_time(
+                {log_type="audit"} |= "guardrails-deletion-tracker/state" | json
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | line_format "{{.annotations_guardrails_deletion_tracker_state}}" | logfmt
+                | unwrap ready | __error__=""
+              [5h]
+            ) by (objectRef_resource, objectRef_namespace, objectRef_name) > 0
+          for: 30m
+          labels:
+            severity: info
+            guardrail: "true"
+            audience: approvers
+            team: platform-engineering
+          annotations:
+            summary: "Deletion of {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} is fully approved but not executed yet"
+            description: >-
+              All required approvals are present. The executor (a third person, not an approver) should run scripts/execute-deletion.sh before the oldest approval expires, or cancel the request if it is no longer needed.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#reminders

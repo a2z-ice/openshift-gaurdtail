@@ -1,9 +1,12 @@
 # ---------------------------------------------------------------------------
 # Approval reaper
-# Purpose : CEL in admission has no clock, so approval expiry (GuardrailConfig.spec.approvalTTL)
-#           is enforced by this CronJob: every 10 minutes it scans every protected kind for
-#           guardrails.example.com/delete-approvals entries older than the TTL and REMOVES them.
-#           The policy only lets this identity remove entries, never add any (see V3).
+# Purpose : CEL in admission has no clock, so the two lifetimes of the deletion workflow are enforced
+#           by this CronJob. Every 10 minutes it scans every Tier-A kind and
+#             * withdraws requests older than GuardrailConfig.spec.requestTTL (default 24h) - or undated,
+#               invalid or future-dated - clearing request, requested-by, requested-at and approvals together;
+#             * removes approval entries older than spec.approvalTTL (default 4h) or future-dated/invalid.
+#           The policy only lets this identity remove entries, never add any (see V3/V4).
+#           Effective lifetime = TTL + up to one schedule interval (10 min) + job runtime.
 # Phase   : 1
 # Rollback: oc delete cronjob approval-reaper -n guardrails-system
 # ---------------------------------------------------------------------------
@@ -111,51 +114,79 @@ data:
     networking.k8s.io/v1/networkpolicies
   reap.sh: |
     #!/usr/bin/env bash
-    # Removes approval entries older than GuardrailConfig.spec.approvalTTL.
-    # Runs as the reaper SA: the admission policy allows it to REMOVE entries only.
+    # 1. Withdraws deletion REQUESTS older than GuardrailConfig.spec.requestTTL (or future-dated / undated / invalid
+    #    delete-requested-at): clears request, requested-by, requested-at and approvals in ONE write.
+    # 2. Removes approval ENTRIES older than spec.approvalTTL (or future-dated / invalid).
+    # Runs as the reaper SA: the admission policy allows it to REMOVE only (V3/V4); guardrails-deletion-tracker
+    # records each removal as event=expired / event=request-expired, which notifies the approvers channel.
     set -euo pipefail
-    ANN="guardrails.example.com/delete-approvals"
+    PFX="guardrails.example.com"
+    ANN="${PFX}/delete-approvals"
+    to_sec() {  # to_sec <4h|30m> -> seconds
+      case "$1" in
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *)  echo "unparseable TTL '$1'" >&2; exit 1 ;;
+      esac
+    }
     TTL_RAW="$(oc get guardrailconfig default -o jsonpath='{.spec.approvalTTL}')"
-    case "$TTL_RAW" in
-      *h) TTL_SEC=$(( ${TTL_RAW%h} * 3600 )) ;;
-      *m) TTL_SEC=$(( ${TTL_RAW%m} * 60 )) ;;
-      *)  echo "unparseable approvalTTL '$TTL_RAW'"; exit 1 ;;
-    esac
+    REQ_TTL_RAW="$(oc get guardrailconfig default -o jsonpath='{.spec.requestTTL}')"; REQ_TTL_RAW="${REQ_TTL_RAW:-24h}"
+    TTL_SEC="$(to_sec "$TTL_RAW")"; REQ_TTL_SEC="$(to_sec "$REQ_TTL_RAW")"
     NOW=$(date -u +%s)
+    # strict RFC3339 UTC only: GNU date would also accept "" (today 00:00) or words such as "yesterday"
+    RFC3339='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+    epoch() { if [[ "$1" =~ $RFC3339 ]]; then date -u -d "$1" +%s 2>/dev/null || echo 0; else echo 0; fi; }
     export HOME=/tmp
-    echo "reaper start ttl=${TTL_RAW} (${TTL_SEC}s) now=$(date -u -Is)"
+    echo "reaper start approvalTTL=${TTL_RAW} requestTTL=${REQ_TTL_RAW} now=$(date -u -Is)"
     while read -r GVR; do
       [[ -z "$GVR" || "$GVR" == \#* ]] && continue
       # oc get accepts <resource>.<version>.<group>; core group has no group part
       IFS='/' read -r -a P <<< "$GVR"
       if [[ ${#P[@]} -eq 2 ]]; then RES="${P[1]}"; else RES="${P[2]}.${P[1]}.${P[0]}"; fi
-      # objects that carry the annotation: "<ns>|<name>|<resourceVersion>|<annotation>"; a missing CRD is skipped, not fatal
+      # objects with a request or approvals: "<ns>|<name>|<resourceVersion>|<has-request>|<requested-at>|<approvals>"
+      # (approvals last: it contains '|'); a missing CRD is skipped, not fatal
       { oc get "$RES" --all-namespaces --ignore-not-found \
-          -o go-template='{{range .items}}{{$item := .}}{{with .metadata.annotations}}{{if index . "guardrails.example.com/delete-approvals"}}{{with $item.metadata.namespace}}{{.}}{{end}}|{{$item.metadata.name}}|{{$item.metadata.resourceVersion}}|{{index . "guardrails.example.com/delete-approvals"}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null || true; } \
-      | while IFS='|' read -r NS NAME RV RAW; do
+          -o go-template='{{range .items}}{{$item := .}}{{with .metadata.annotations}}{{if or (index . "guardrails.example.com/delete-approvals") (index . "guardrails.example.com/delete-request")}}{{with $item.metadata.namespace}}{{.}}{{end}}|{{$item.metadata.name}}|{{$item.metadata.resourceVersion}}|{{if index . "guardrails.example.com/delete-request"}}1{{end}}|{{with index . "guardrails.example.com/delete-requested-at"}}{{.}}{{end}}|{{with index . "guardrails.example.com/delete-approvals"}}{{.}}{{end}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null || true; } \
+      | while IFS='|' read -r NS NAME RV HASREQ REQAT RAW; do
           [[ -z "$NAME" ]] && continue
-          KEEP=""
-          IFS=',' read -r -a ENTRIES <<< "$RAW"
-          for E in "${ENTRIES[@]}"; do
-            U="${E%%|*}"; TS="${E#*|}"
-            TS_SEC=$(date -u -d "$TS" +%s 2>/dev/null || echo 0)
-            # expired (older than TTL) OR implausible (more than 5 min in the future: an approver cannot
-            # extend their own approval by writing a far-future timestamp) OR unparseable (TS_SEC=0)
-            if (( NOW - TS_SEC > TTL_SEC || TS_SEC > NOW + 300 )); then
-              echo "expire ${RES} ${NS:-<cluster>}/${NAME} approver=${U} at=${TS} (ttl or future/invalid timestamp)"
-            else
-              KEEP="${KEEP:+${KEEP},}${E}"
-            fi
-          done
-          if [[ "$KEEP" != "$RAW" ]]; then
-            NSARG=(); [[ -n "$NS" ]] && NSARG=(-n "$NS")
-            # --resource-version: never overwrite a concurrent fresh approval (conflict -> retried next run)
-            if [[ -z "$KEEP" ]]; then
-              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}-" --overwrite --resource-version="$RV" || echo "conflict on ${NS:-<cluster>}/${NAME}; will retry"
-            else
-              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}=${KEEP}" --overwrite --resource-version="$RV" || echo "conflict on ${NS:-<cluster>}/${NAME}; will retry"
+          NSARG=(); [[ -n "$NS" ]] && NSARG=(-n "$NS")
+          WHERE="${RES} ${NS:-<cluster>}/${NAME}"
+          # ---- 1. request lifetime
+          if [[ -n "$HASREQ" ]]; then
+            RA_SEC=$(epoch "$REQAT")
+            if (( RA_SEC == 0 || NOW - RA_SEC > REQ_TTL_SEC || RA_SEC > NOW + 300 )); then
+              echo "withdraw ${WHERE} requested_at=${REQAT:-<none>} (requestTTL exceeded, undated, invalid or future-dated)"
+              # --resource-version: never overwrite a concurrent change (conflict -> retried next run)
+              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" --overwrite --resource-version="$RV" \
+                "${PFX}/delete-request-" "${PFX}/delete-requested-by-" "${PFX}/delete-requested-at-" "${ANN}-" \
+                || echo "conflict on ${WHERE}; will retry"
+              continue
             fi
           fi
+          # ---- 2. approval lifetime
+          KEEP=""
+          if [[ -n "$RAW" ]]; then
+            IFS=',' read -r -a ENTRIES <<< "$RAW"
+            for E in "${ENTRIES[@]}"; do
+              U="${E%%|*}"; TS="${E#*|}"
+              TS_SEC=$(epoch "$TS")
+              # expired (older than TTL) OR implausible (more than 5 min in the future: an approver cannot
+              # extend their own approval by writing a far-future timestamp) OR unparseable (TS_SEC=0)
+              if (( NOW - TS_SEC > TTL_SEC || TS_SEC > NOW + 300 )); then
+                echo "expire ${WHERE} approver=${U} at=${TS} (ttl or future/invalid timestamp)"
+              else
+                KEEP="${KEEP:+${KEEP},}${E}"
+              fi
+            done
+          fi
+          if [[ "$KEEP" != "$RAW" ]]; then
+            if [[ -z "$KEEP" ]]; then
+              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}-" --overwrite --resource-version="$RV" || echo "conflict on ${WHERE}; will retry"
+            else
+              oc annotate ${NSARG[@]+"${NSARG[@]}"} "$RES" "$NAME" "${ANN}=${KEEP}" --overwrite --resource-version="$RV" || echo "conflict on ${WHERE}; will retry"
+            fi
+          fi
+          if [[ -n "$HASREQ" ]]; then echo "pending ${WHERE} requested_at=${REQAT} approvals=${KEEP:-<none>}"; fi
         done
     done < /config/resources.txt
     echo "reaper done"

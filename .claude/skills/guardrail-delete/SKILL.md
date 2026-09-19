@@ -12,19 +12,20 @@ Three different humans are required: requester, two approvers (in `gitops-deleti
 ## Procedure
 
 1. Confirm a change ticket exists and the target: `<resource> <name> [-n <ns>]`. Confirm the caller's role: `oc whoami` and `oc get group gitops-deletion-approvers -o jsonpath='{.users}'`.
-2. **Requester**: `scripts/request-deletion.sh <res> <name> [-n ns] "CHG…: <reason>"` (sets request + requested-by, clears approvals).
+2. **Requester**: `scripts/request-deletion.sh <res> <name> [-n ns] "CHG…: <reason>"` (sets request + requested-by + requested-at, clears approvals). The approvers are notified automatically (email + their Teams channel, `CriticalDeletionRequested`); the request is withdrawn after 24h (`requestTTL`).
 3. **Approver 1, then approver 2** (each from their own login): `scripts/approve-deletion.sh <res> <name> [-n ns]` and type `approve`.
 4. **Executor**, within 4h: `scripts/execute-deletion.sh <res> <name> [-n ns]`. A red `CriticalResourceDeleted` alert to email + Teams is expected; acknowledge it with the ticket.
 5. If Argo CD manages the object, merge the PR that removes it from Git in the same window, or self-heal recreates it.
 6. Append a line to `llm/memory.md` §State log.
 
 Cancel any time: `scripts/cancel-deletion.sh <res> <name> [-n ns]`.
+Progress (have of need, remaining, expiries): `scripts/status-deletion.sh <res> <name> [-n ns]`; every open request: `scripts/list-pending-deletions.sh`. Lifecycle and notifications: docs/19.
 
 ## If denied
 
 Read the `GUARDRAIL DENIED:` message; it names the missing condition. Check state:
 `oc get <res> <name> [-n ns] -o jsonpath='{.metadata.annotations}' | tr ',' '\n' | grep guardrails`
-Typical causes: one approval only; approver == requester; executor is an approver; approvals expired (reaper) → re-approve; reason edited after approvals (wipes them); approver not in the group (IdP sync lag).
+Typical causes: request opened without `delete-requested-at` (old script: run request-deletion.sh again); one approval only; approver == requester; executor is an approver; approvals expired (reaper) → re-approve; reason edited after approvals (wipes them); approver not in the group (IdP sync lag).
 
 ## Never
 

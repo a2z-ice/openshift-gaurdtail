@@ -12,6 +12,8 @@
 #   guardrail-red   : email + Microsoft Teams (msteamsv2 = Power Automate "Workflows" webhook, Alertmanager >= 0.28;
 #                     OCP 4.21 ships 0.29.0). No grouping delay, repeats every 30 min until resolved.
 #   guardrail-info  : Teams only, batched.
+#   guardrail-approvers : the deletion desk - approvers' distribution list + approvers' Teams channel. Receives only
+#                     audience="approvers" alerts (request opened, approval N of M, expired, closed, reminders), docs/19.
 #   default         : your existing on-call receiver (kept as-is).
 #
 # Keep everything you already have in your alertmanager.yaml and ADD the guardrail receivers/routes.
@@ -49,6 +51,17 @@ stringData:
       group_interval: 5m
       repeat_interval: 12h
       routes:
+        # ---- approver notifications (docs/19): request opened, approval N of M, expired, closed, hourly reminders.
+        #      Stops here (no continue): these are workflow messages, not incidents. The platform keeps its own
+        #      record through CriticalDeletionApprovalRecorded (info route below) and the audit trail.
+        - matchers:
+            - guardrail="true"
+            - audience="approvers"
+          receiver: guardrail-approvers
+          group_by: [alertname, objectRef_resource, objectRef_namespace, objectRef_name]
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1h
         # ---- guardrail RED path: critical, immediate, both channels, keeps nagging until resolved
         - matchers:
             - guardrail="true"
@@ -103,6 +116,19 @@ stringData:
             webhook_url: https://REPLACE.logic.azure.com:443/workflows/REPLACE/triggers/manual/paths/invoke?api-version=2016-06-01&sig=REPLACE
             title: '{{ template "guardrail.teams.title" . }}'
             text: '{{ template "guardrail.teams.text" . }}'
+      - name: guardrail-approvers
+        email_configs:
+          - to: gitops-deletion-approvers@example.com
+            send_resolved: false
+            headers:
+              Subject: '{{ template "guardrail.email.subject" . }}'
+            html: '{{ template "guardrail.email.html" . }}'
+        msteamsv2_configs:
+          - send_resolved: false
+            # the APPROVERS' channel (a second Workflows webhook), not the platform channel
+            webhook_url: https://REPLACE.logic.azure.com:443/workflows/REPLACE-APPROVERS/triggers/manual/paths/invoke?api-version=2016-06-01&sig=REPLACE
+            title: '{{ template "guardrail.teams.title" . }}'
+            text: '{{ template "guardrail.teams.text" . }}'
       - name: guardrail-teams-only
         msteamsv2_configs:
           - send_resolved: true
@@ -128,6 +154,10 @@ stringData:
       <tr><td>Actor</td><td>{{ .Labels.user_username }}{{ if .Labels.impersonatedUser_username }} (impersonating {{ .Labels.impersonatedUser_username }}){{ end }}</td></tr>
       <tr><td>Resource</td><td>{{ .Labels.objectRef_resource }} {{ .Labels.objectRef_namespace }}/{{ .Labels.objectRef_name }}</td></tr>
       <tr><td>Cluster</td><td>{{ .Labels.openshift_labels_cluster }}</td></tr>
+      {{ if .Labels.need }}<tr><td>Approvals</td><td>{{ .Labels.have }} of {{ .Labels.need }}{{ if .Labels.remaining }} ({{ .Labels.remaining }} remaining){{ end }} {{ .Labels.approvers }}</td></tr>{{ end }}
+      {{ if .Labels.requested_by }}<tr><td>Requested by</td><td>{{ .Labels.requested_by }}{{ if .Labels.req }}: {{ .Labels.req }}{{ end }}</td></tr>{{ end }}
+      {{ if .Labels.request_expires }}<tr><td>Request expires</td><td>{{ .Labels.request_expires }}</td></tr>{{ end }}
+      {{ if .Labels.first_approval_expires }}<tr><td>Oldest approval expires</td><td>{{ .Labels.first_approval_expires }}</td></tr>{{ end }}
       <tr><td>Started</td><td>{{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}</td></tr>
       <tr><td>Runbook</td><td><a href="{{ .Annotations.runbook_url }}">{{ .Annotations.runbook_url }}</a></td></tr>
     </table>
@@ -148,6 +178,11 @@ stringData:
     - **Actor:** {{ .Labels.user_username }}{{ if .Labels.impersonatedUser_username }} (impersonating {{ .Labels.impersonatedUser_username }}){{ end }}
     - **Resource:** {{ .Labels.objectRef_resource }} {{ .Labels.objectRef_namespace }}/{{ .Labels.objectRef_name }}
     - **Cluster:** {{ .Labels.openshift_labels_cluster }}
+    {{ if .Labels.need }}- **Approvals:** {{ .Labels.have }} of {{ .Labels.need }}{{ if .Labels.remaining }} ({{ .Labels.remaining }} remaining){{ end }} {{ .Labels.approvers }}
+    {{ end }}{{ if .Labels.requested_by }}- **Requested by:** {{ .Labels.requested_by }}{{ if .Labels.req }}: {{ .Labels.req }}{{ end }}
+    {{ end }}{{ if .Labels.request_expires }}- **Request expires:** {{ .Labels.request_expires }}
+    {{ end }}{{ if .Labels.first_approval_expires }}- **Oldest approval expires:** {{ .Labels.first_approval_expires }}
+    {{ end }}
     - **Severity:** {{ .Labels.severity }}   **Team:** {{ .Labels.team }}
     - **Started:** {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
     - **Runbook:** {{ .Annotations.runbook_url }}

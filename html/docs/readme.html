@@ -4,7 +4,7 @@
 <script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
 </head><body>
 <header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
-<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
 <main>
 <h1>OpenShift 4.21 – Audit Trail, Critical-Resource Deletion Guardrails and Red Alerting</h1>
@@ -118,7 +118,7 @@
     participant API as kube-apiserver + VAP
     participant AM as Alertmanager
     R->>API: annotate delete-request and delete-requested-by = own username
-    API-->>AM: info CriticalDeletionApprovalRecorded
+    API-->>AM: info CriticalDeletionRequested to the approvers channel
     A1->>API: append delete-approvals entry approver1|timestamp
     Note over API: CEL checks: entry names the caller, caller in approver group,&lt;br/>caller is not the requester, nothing else changed
     A2->>API: append delete-approvals entry approver2|timestamp
@@ -134,7 +134,7 @@
 manifests/base/             phase-3 (enforce) definitions, kustomize
 manifests/overlays/phaseN   audit-only → warn → enforce → gitops-only (Argo CD points here)
 manifests/0X-*/             one directory per layer, every file has a header: purpose, phase, rollback
-scripts/                    request/approve/execute/cancel a deletion, verify-install, test matrix, audit query
+scripts/                    request/approve/execute/cancel/status/list-pending deletions, verify-install, test matrix, audit query
 .github/                    CODEOWNERS, ruleset (2 approvals, no bypass), policy CI
 </code></pre>
 <h2>Quick start (after reading docs/10-rollout-plan.md)</h2>
@@ -308,6 +308,11 @@ scripts/verify-install.sh
 <td>Narrative for leaders and engineers: what the project solves, why and how, every layer and file with what it solves, roles, rollout and decisions to approve</td>
 </tr>
 <tr>
+<td>19</td>
+<td><a href="19-deletion-approval-lifecycle.html">Deletion approval lifecycle</a></td>
+<td>how accidental deletion is prevented, how approvers are notified, how the system counts approvals and remaining ones, how long requests and approvals live; defects and gaps fixed</td>
+</tr>
+<tr>
 <td>–</td>
 <td><a href="../index.html">HTML portal</a></td>
 <td>entry point with summary and navigation to the study guide and HTML versions of every document (<code>node scripts/build-html-docs.mjs</code> regenerates <code>html/docs/</code>)</td>
@@ -319,7 +324,7 @@ scripts/verify-install.sh
 </tr>
 </tbody></table>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a></p>
 </main>
 <footer>Generated from <code>README.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

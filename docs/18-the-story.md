@@ -261,7 +261,7 @@ Every write to the cluster passes the same checkpoints inside kube-apiserver. Th
 flowchart LR
     CL["Client<br/>oc, console, Argo CD"] --> AUTHN["Authentication<br/>who are you, identity markers"]
     AUTHN --> AUTHZ["RBAC<br/>may you use this verb"]
-    AUTHZ --> ADM["Admission<br/>5 guardrail policies in CEL"]
+    AUTHZ --> ADM["Admission<br/>6 guardrail policies in CEL"]
     ADM -- "denied" --> DENY["403 GUARDRAIL DENIED"]
     ADM -- "allowed" --> ETCD[("etcd<br/>encrypted")]
     AUTHN -.-> AUD["Audit log<br/>every stage, with request body"]
@@ -283,7 +283,7 @@ flowchart LR
 | 3 Admission policy | cluster-admin can delete anything with one command | `ValidatingAdmissionPolicy` enforcing request + 2 approvers + executor | `manifests/03-guardrails` |
 | 4 Self-protection | Someone disables the control first | policy objects are critical and GitOps-only in every phase; self-heal; P1 alert | `manifests/03-guardrails` |
 | 5 Audit | "Who did it?" has no reliable answer | API-server audit with request bodies, forwarded to SIEM and Loki | `manifests/01-audit` |
-| 6 Detection | Nobody notices | 19 audit-log alerts + 15 metrics alerts that work even if audit forwarding is blinded | `manifests/05-alerting`, `manifests/07-hardening-extras` |
+| 6 Detection | Nobody notices | 25 audit-log alerts + 16 metrics alerts that work even if audit forwarding is blinded | `manifests/05-alerting`, `manifests/07-hardening-extras` |
 | 7 Notification | Alerts sit unread in a console | Alertmanager to email and Teams with no grouping delay; delivery failure alerted | `manifests/05-alerting` |
 | 8 Recovery | Damage done anyway | OADP schedules, etcd snapshots, Git cold start, rehearsed restore | `manifests/06-backup`, `manifests/07-hardening-extras` |
 
@@ -318,7 +318,7 @@ sequenceDiagram
     participant API as kube-apiserver and policy
     participant AM as Email and Teams
     R->>API: request-deletion.sh sets delete-request and delete-requested-by
-    API-->>AM: info CriticalDeletionApprovalRecorded
+    API-->>AM: info CriticalDeletionRequested to the approvers channel
     A1->>API: approve-deletion.sh appends approver1 with timestamp
     A2->>API: approve-deletion.sh appends approver2 with timestamp
     Note over API: each approval must name the caller, caller in approvers group,<br/>not the requester, not a duplicate, nothing else changed
@@ -344,7 +344,7 @@ scripts/execute-deletion.sh argocd openshift-gitops -n openshift-gitops         
 | **V3** | UPDATE | forged, duplicate or third-party approvals, approving your own request, hiding a spec change inside an approval |
 | **V4** | UPDATE | opening a request in someone else's name, or changing the reason after approvals were given |
 
-Approvals expire after 4 hours. CEL has no clock, so a small CronJob (the *reaper*) removes stale entries every 10 minutes; the policy lets it *remove* entries only.
+Approvals expire after 4 hours and an open request after 24 hours. CEL has no clock, so a small CronJob (the *reaper*) removes stale entries every 10 minutes; the policy lets it *remove* entries only.
 
 ### Files
 
@@ -355,8 +355,10 @@ Approvals expire after 4 hours. CEL has no clock, so a small CronJob (the *reape
 | `manifests/03-guardrails/vap-critical-delete.yaml` | The two-person rule itself | CEL `variables` compute "is critical", parse the annotations, derive `deletionApproved`; `validations` V1 to V4; `auditAnnotations.decision` records every decision for the alerts |
 | `manifests/03-guardrails/vap-critical-delete-bindings.yaml` | Apply the rule cheaply and fail safe | binding `-labelled` selects labelled objects (matches old *or* new object, so removing the label still matches) and fails closed; binding `-named` covers name-protected kinds and allows if the config is missing so OLM and namespace lifecycle never wedge |
 | `manifests/03-guardrails/vap-critical-label-control.yaml` | A tenant labels their own object critical to disrupt the platform team | only trusted GitOps identities, break-glass or approvers may *add* the label |
-| `manifests/03-guardrails/reaper-cronjob.yaml` | Old approvals being reused later | CronJob, ServiceAccount and narrow RBAC that remove expired, future-dated or invalid approvals every 10 minutes |
+| `manifests/03-guardrails/vap-deletion-tracker.yaml` | Approvers not knowing a request waits for them; nobody knowing how many approvals remain | records the state of every workflow step (have, need, remaining, expiries) in the audit log without ever denying; Loki rules turn it into notifications and reminders for the approvers' email list and Teams channel (`docs/19`) |
+| `manifests/03-guardrails/reaper-cronjob.yaml` | Old approvals or old requests being reused later | CronJob, ServiceAccount and narrow RBAC that remove expired, future-dated or invalid approvals every 10 minutes |
 | `scripts/lib.sh` | Everyone must write the annotations exactly right | shared annotation contract, identity checks and safe reads used by the four workflow scripts |
+| `scripts/status-deletion.sh`, `list-pending-deletions.sh` | "Where does my request stand?" | read-only views: approvals so far, remaining, request and approval expiry, every open request on the cluster |
 | `scripts/request-deletion.sh`, `approve-deletion.sh`, `execute-deletion.sh`, `cancel-deletion.sh` | Humans making mistakes with raw `oc annotate` | guided steps that use the caller's own identity, show the state, ask for confirmation (`--yes` to skip); execute refuses Tier-B kinds and prints the audit query afterwards |
 
 **What your team does:** approvers run `approve-deletion.sh` once on a scratch object during phase 1; requesters and executors learn the four commands (`.claude/skills/guardrail-delete/SKILL.md`, `docs/09` §Request).
@@ -532,8 +534,8 @@ A blocked deletion that nobody hears about is a missed warning; a successful one
 
 ### How
 
-- **Pipeline A, audit-based (19 Loki alert rules):** key alerts include `CriticalResourceDeleted` (critical), `GitOpsCriticalDeletionApplied`, `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phases 1 and 2), `GuardrailPolicyModified`, `AuditProfileChanged`, `PrivilegedRBACChange`, `ImpersonatedWriteDenied`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `KubeadminOrSystemAdminUsed`, `ArgoCDDirectMutation`, `ControlPlaneNodeAccess`.
-- **Pipeline B, metrics-based (15 Prometheus rules), independent of audit logs:** Argo CD controller, server or operator missing, GitOps namespace terminating, guardrails app out of sync, audit ingestion stalled, forwarder not ready, reaper failing, Loki ruler down, policy evaluation errors, and **notification delivery failing**.
+- **Pipeline A, audit-based (25 Loki alert rules):** key alerts include `CriticalResourceDeleted` (critical), `GitOpsCriticalDeletionApplied`, `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phases 1 and 2), `GuardrailPolicyModified`, `AuditProfileChanged`, `PrivilegedRBACChange`, `ImpersonatedWriteDenied`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `KubeadminOrSystemAdminUsed`, `ArgoCDDirectMutation`, `ControlPlaneNodeAccess`.
+- **Pipeline B, metrics-based (16 Prometheus rules), independent of audit logs:** Argo CD controller, server or operator missing, GitOps namespace terminating, guardrails app out of sync, audit ingestion stalled, forwarder not ready, reaper failing, Loki ruler down, policy evaluation errors, and **notification delivery failing**.
 - **Alertmanager 0.29** routes every alert labelled `guardrail="true"` to email and a Teams channel (native `msteamsv2_configs` with a Teams Workflows webhook), `group_wait: 0s`, repeating every 30 minutes until resolved, and also to the default on-call receiver.
 
 ```mermaid
@@ -541,11 +543,11 @@ flowchart LR
     subgraph A["Pipeline A - audit based"]
         KAS["kube-apiserver audit"] --> VEC["Vector collector"]
         VEC --> LK[("LokiStack audit tenant")]
-        LK --> LR["Loki ruler<br/>19 alert rules"]
+        LK --> LR["Loki ruler<br/>25 alert rules"]
         VEC --> SPL[("Splunk SIEM")]
     end
     subgraph B["Pipeline B - metrics based"]
-        MET["Argo CD, forwarder, reaper,<br/>VAP and Alertmanager metrics"] --> PR["Prometheus<br/>15 alert rules"]
+        MET["Argo CD, forwarder, reaper,<br/>VAP and Alertmanager metrics"] --> PR["Prometheus<br/>16 alert rules"]
     end
     LR --> AM["Alertmanager<br/>route guardrail=true<br/>group_wait 0s, repeat 30m"]
     PR --> AM
@@ -622,7 +624,7 @@ The repository is **one Argo CD Application**. Its `spec.source.path` points at 
 
 | File | Role |
 |---|---|
-| `manifests/base/kustomization.yaml` | renders everything once (89 objects), in dependency order |
+| `manifests/base/kustomization.yaml` | renders everything once (91 objects), in dependency order |
 | `manifests/overlays/phase1-audit/` | deletion, label-control, gitops-only, impersonation bindings `[Audit]`; hardened binding `[Deny, Audit]` |
 | `manifests/overlays/phase2-warn/` | the same bindings `[Warn, Audit]` |
 | `manifests/overlays/phase3-enforce/` | deletion, label-control, impersonation `[Deny, Audit]`; gitops-only still `[Audit]` |
@@ -633,7 +635,7 @@ The repository is **one Argo CD Application**. Its `spec.source.path` points at 
 | Tool | What it proves |
 |---|---|
 | `scripts/verify-install.sh` | every layer is healthy: policies ready, bindings present, config present, forwarder ready, ruler loaded, Alertmanager config valid, backups scheduled |
-| `scripts/test-guardrails.sh` | about 70 allow/deny expectations in a scratch namespace; reads each binding's live action so it is correct in every phase; writes an evidence log |
+| `scripts/test-guardrails.sh` | 76 allow/deny expectations in a scratch namespace; reads each binding's live action so it is correct in every phase; writes an evidence log |
 | `docs/14-manual-test-guide.md` | T-numbered scenarios with the exact command and expected output, for sign-off |
 | `docs/16-production-readiness-review.md` | 59 audit findings with fixes, and the control-to-test traceability matrix |
 | `scripts/check-mermaid.mjs`, `scripts/build-html-docs.mjs` | diagrams render on GitHub; the published site matches the Markdown |
@@ -688,6 +690,7 @@ flowchart TB
 | `docs/13-solution-justification.md` | the argument for a review board, with rejected alternatives |
 | `docs/15-implementation-guide.md` | the step-by-step build, Parts A to G, with a tracking table |
 | `docs/17-impersonation-control.md` | why `--as` is limited to reads and dry-runs |
+| `docs/19-deletion-approval-lifecycle.md` | how a deletion is prevented, how approvers are notified, how approvals are counted and how long requests live |
 | `AGENTS.md`, `CLAUDE.md`, `llms.txt`, `llm/`, `.claude/` | a compact operating guide, skills and agents so AI assistants can help without weakening the controls |
 | `html/` | this published site: portal, study guide and the generated documents |
 

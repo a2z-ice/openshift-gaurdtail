@@ -12,13 +12,13 @@ Roles: **requester** (`gitops-deletion-requesters` or an approver), **two approv
    ```bash
    scripts/request-deletion.sh <resource> <name> [-n <ns>] "CHG0012345: <reason>"
    ```
-   Post the change ticket and the object in the Teams channel; the `CriticalDeletionApprovalRecorded` info alert appears there too.
+   The approvers are notified automatically (`CriticalDeletionRequested` to their email list and Teams channel, docs/19); reminders follow hourly until the request is approved, cancelled or withdrawn after `requestTTL` (24 h). Progress at any time: `scripts/status-deletion.sh <resource> <name> [-n <ns>]`; all open requests: `scripts/list-pending-deletions.sh`.
 2. Approver 1, then approver 2, each from their own session:
    ```bash
    scripts/approve-deletion.sh <resource> <name> [-n <ns>]
    ```
    The script shows the request and asks for the literal word `approve`. It fails if you are the requester, already approved, or not in the group.
-3. Executor, within `approvalTTL` (4 h):
+3. Executor, after `CriticalDeletionApproved … FULLY APPROVED` and before the oldest approval expires (`approvalTTL`, 4 h; the notification prints the time):
    ```bash
    scripts/execute-deletion.sh <resource> <name> [-n <ns>]
    ```

@@ -122,7 +122,7 @@ spec:
       expression: >-
         variables.boundToken && (request.userInfo.username in params.spec.exemptUsers
           || request.userInfo.username in params.spec.gitopsControllers
-          || request.userInfo.username in params.spec.gitopsServiceAccounts)"
+          || request.userInfo.username in params.spec.gitopsServiceAccounts)
     - name: nonGuardrailAnnotationsUnchanged
       expression: >-
         variables.newAnn.all(k, k.startsWith('guardrails.example.com/delete-') || (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k]))

@@ -22,6 +22,13 @@ Each covers the other's failure mode: stop the forwarder and `AuditLogIngestionS
 | `ImpersonatedWriteDenied` | audit | critical | security | a non-dry-run write under impersonation was blocked (docs/17) |
 | `GitOpsResourceDeleted` | audit | critical | email + Teams | name-based fallback for GitOps namespaces/kinds, independent of the policy |
 | `CriticalResourceDeleteDenied` | audit | warning | Teams | blocked attempt; who and what |
+| `CriticalDeletionRequested` | audit (tracker) | info | **approvers** email + Teams, immediate | a deletion request was opened: who, what, reason, approvals needed, request expiry, approve command (docs/19) |
+| `CriticalDeletionApproved` | audit (tracker) | info | **approvers** | approval *have* of *need*, remaining or FULLY APPROVED, oldest approval expiry |
+| `CriticalDeletionApprovalsExpired` | audit (tracker) | info | **approvers** | the reaper removed approvals older than `approvalTTL` |
+| `CriticalDeletionRequestClosed` | audit (tracker) | info | **approvers** | cancelled, request expired (`requestTTL`), approvals cleared, or executed |
+| `CriticalDeletionPendingApproval` | audit (tracker, last state) | info | **approvers**, hourly | reminder: an open request still needs approvals |
+| `CriticalDeletionAwaitingExecution` | audit (tracker, last state) | info | **approvers**, hourly | reminder: fully approved but not executed |
+| `GuardrailReaperNotRunning` | metrics | warning | Teams | no reaper run completed for 30 min, CronJob suspended or missing: expiry is not enforced |
 | `CriticalDeletionApprovalRecorded` | audit | info | Teams (batched) | request/approval activity; expected during a planned deletion |
 | `GuardrailPolicyModified` | audit | critical | email + Teams | policy/binding/config/RBAC/reaper changed by anyone but Argo CD |
 | `AuditProfileChanged` | audit | critical | email + Teams | `APIServer/cluster` changed out of band |
@@ -45,6 +52,7 @@ Every alert carries `guardrail="true"`, `severity`, `team`, a `summary`, a `desc
 ## Routing (`manifests/05-alerting/alertmanager-main.yaml`)
 
 ```
+route guardrail="true" & audience="approvers" → receiver guardrail-approvers group_wait 0s, group_interval 1m, repeat 1h (no continue: workflow messages, docs/19)
 route guardrail="true" & severity="critical"  → receiver guardrail-red        group_wait 0s, group_interval 1m, repeat 30m, continue
 route guardrail="true" & severity="warning"   → receiver guardrail-teams-only group_wait 15s, repeat 4h, continue
 route guardrail="true" & severity="info"      → receiver guardrail-teams-only group_wait 1m, group_interval 10m
@@ -53,7 +61,7 @@ route guardrail="true"                        → receiver default (your existin
 
 Inhibition: a confirmed `CriticalResourceDeleted` silences `CriticalResourceDeleteDenied` for the same object.
 
-Receivers: `guardrail-red` = `email_configs` (HTML template, `X-Priority: 1`) + `msteamsv2_configs`; `guardrail-teams-only` = Teams only. Templates live in the `guardrail.tmpl` key of the same secret and are referenced as `/etc/alertmanager/config/guardrail.tmpl` (the Prometheus Operator mounts every key of `alertmanager-main` there).
+Receivers: `guardrail-red` = `email_configs` (HTML template, `X-Priority: 1`) + `msteamsv2_configs`; `guardrail-teams-only` = Teams only; `guardrail-approvers` = the approvers' distribution list + the approvers' Teams channel (a second Workflows webhook), `send_resolved: false`. The templates print approval progress (have of need, remaining, requester, expiries) when those labels are present. Templates live in the `guardrail.tmpl` key of the same secret and are referenced as `/etc/alertmanager/config/guardrail.tmpl` (the Prometheus Operator mounts every key of `alertmanager-main` there).
 
 ## Microsoft Teams setup (Workflows, not the retired O365 connector)
 

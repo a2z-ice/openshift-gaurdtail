@@ -24,7 +24,7 @@ audit trail (API-server audit → SIEM + Loki), a **two-person rule for out-of-b
 | Item | Value |
 |---|---|
 | Critical marker | label `guardrails.example.com/critical: "true"`; some kinds protected by name (namespaces `openshift-gitops*`, `guardrails-system`, `openshift-logging`, `openshift-adp`; CRDs in `argoproj.io`, `guardrails.example.com`, `loki.grafana.com`, `observability.openshift.io`, `velero.io`, `oadp.openshift.io`; objects named `guardrails-*`; `ArgoCD/openshift-gitops`; OLM objects in `openshift-gitops-operator`; `APIServer/cluster`; the approver groups) |
-| Annotations | `guardrails.example.com/delete-request` = `"<ticket>: <reason>"`; `…/delete-requested-by` = requester's own username; `…/delete-approvals` = `user\|RFC3339Z,user\|RFC3339Z` (append one entry per approver) |
+| Annotations | `guardrails.example.com/delete-request` = `"<ticket>: <reason>"`; `…/delete-requested-by` = requester's own username; `…/delete-requested-at` = RFC3339Z when opened (required); `…/delete-approvals` = `user\|RFC3339Z,user\|RFC3339Z` (append one entry per approver) |
 | Rule | ≥ `minApprovers` (2) distinct approvers ∈ `gitops-deletion-approvers`, none = requester, executor ∉ approvers, request present, nothing else changed in the same update; a change to the request is denied unless approvals are cleared in the same write |
 | Param object | `GuardrailConfig/default` (`guardrails.example.com/v1alpha1`) |
 | Exempt identities | `exemptUsers`: `system:apiserver`, `system:serviceaccount:guardrails-system:breakglass`. `gitopsControllers` (Git path, also exempt): `openshift-gitops-argocd-application-controller`, `openshift-gitops-applicationset-controller` |
@@ -33,9 +33,9 @@ audit trail (API-server audit → SIEM + Loki), a **two-person rule for out-of-b
 | Self-protection set | GuardrailConfig, policies/bindings, guardrails-* RBAC, privileged Groups, APIServer/OAuth, labelled CronJobs: GitOps-only (`-hardened` binding, Deny in every phase); humans may only add approval annotations |
 | Groups | `platform-admins` (JIT, bound to `guardrails-platform-admin` = every verb except impersonate/escalate/bind, plus `guardrails-impersonator` = impersonate users/groups/serviceaccounts only), `gitops-deletion-approvers`, `gitops-deletion-requesters`, `gitops-operators`, `auditors`, `breakglass-custodians` |
 | Impersonation | usable only for reads, access reviews and `--dry-run=server`. Real sessions carry markers in `userInfo.extra` (humans: `scopes.authorization.openshift.io`; SAs: `authentication.kubernetes.io/credential-id`); nobody may impersonate `userextras`; exemptions/approver status require the marker; `guardrails-impersonation-dry-run-only` denies non-dry-run writes without it |
-| Approval TTL | 4h, enforced by CronJob `guardrails-system/approval-reaper` (remove-only; also removes future-dated/invalid timestamps) |
+| Lifetimes | approval 4h (`approvalTTL`), open request 24h from `delete-requested-at` (`requestTTL`), both enforced by CronJob `guardrails-system/approval-reaper` every 10 min (remove-only; also removes future-dated/invalid/undated). Memory = the annotations on the object; progress = `guardrails-deletion-tracker` audit annotation (`have/need/remaining`) |
 | Phases | 1 audit `[Audit]` → 2 warn `[Warn,Audit]` → 3 enforce `[Deny,Audit]` → 4 gitops-only mutation for all critical kinds `[Deny,Audit]`; the `-hardened` binding is Deny in all phases; selected by `spec.source.path` of Argo CD app `openshift-gitops/guardrails` |
-| Alerts | `guardrail="true"` label; critical → email + Teams (`group_wait 0s`, repeat 30m); key names: `CriticalResourceDeleted` (out-of-band), `GitOpsCriticalDeletionApplied` (Git path, warning), `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phase 1/2), `GuardrailPolicyModified`, `ImpersonationUsed`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `ArgoCDApplicationControllerMissing`, `AuditLogIngestionStalled`, `GuardrailPolicyEvaluationErrors`, `GuardrailNotificationFailing`, `ImpersonatedWriteDenied` |
+| Alerts | `guardrail="true"` label; critical → email + Teams (`group_wait 0s`, repeat 30m); key names: `CriticalResourceDeleted` (out-of-band), `GitOpsCriticalDeletionApplied` (Git path, warning), `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phase 1/2), `GuardrailPolicyModified`, `ImpersonationUsed`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `ArgoCDApplicationControllerMissing`, `AuditLogIngestionStalled`, `GuardrailPolicyEvaluationErrors`, `GuardrailNotificationFailing`, `ImpersonatedWriteDenied`, `GuardrailReaperNotRunning`; approvers' channel (`audience="approvers"`): `CriticalDeletionRequested`, `CriticalDeletionApproved`, `CriticalDeletionApprovalsExpired`, `CriticalDeletionRequestClosed`, `CriticalDeletionPendingApproval`, `CriticalDeletionAwaitingExecution` |
 | Audit fields (Loki json) | `verb`, `user_username`, `impersonatedUser_username`, `objectRef_resource/_namespace/_name`, `responseStatus_code`, `annotations_guardrails_critical_delete_decision`, `annotations_validation_policy_admission_k8s_io_validation_failure` |
 | Versions verified | OCP 4.21 = K8s 1.34, Alertmanager 0.29.0 (`msteamsv2_configs`), GitOps 1.19+, Logging 6.x (`observability.openshift.io/v1`), Loki Operator 6.x, OADP 1.5 |
 
@@ -47,9 +47,11 @@ scripts/request-deletion.sh <res> <name> [-n ns] "CHG…: reason"
 scripts/approve-deletion.sh <res> <name> [-n ns]          # approver 1, then approver 2
 scripts/execute-deletion.sh <res> <name> [-n ns]          # executor
 scripts/cancel-deletion.sh  <res> <name> [-n ns]
+scripts/status-deletion.sh  <res> <name> [-n ns]          # have of need, remaining, expiries (read-only)
+scripts/list-pending-deletions.sh                         # every open request on the cluster (read-only)
 # health / evidence
 scripts/verify-install.sh
-scripts/test-guardrails.sh                                # phase-aware matrix (~70 cases), scratch ns guardrails-test, evidence/ dir; impersonation mode needs a system:masters credential (pre-prod)
+scripts/test-guardrails.sh                                # phase-aware matrix (76 cases), scratch ns guardrails-test, evidence/ dir; impersonation mode needs a system:masters credential (pre-prod)
 scripts/audit-query.sh <object-name>                      # prints LogQL + SPL, runs logcli if available
 # local validation
 for o in manifests/base manifests/overlays/*; do kustomize build "$o" >/dev/null; done; yamllint -c .yamllint manifests
@@ -76,6 +78,7 @@ oc delete argocd openshift-gitops -n openshift-gitops --dry-run=server
 | What is NOT covered | `docs/01-threat-model.md` §Residual-risk register |
 | Audit findings, fixes, test traceability | `docs/16-production-readiness-review.md` |
 | Impersonation: why `--as` writes are denied | `docs/17-impersonation-control.md` |
+| How a deletion is prevented, notified, counted and expired | `docs/19-deletion-approval-lifecycle.md` |
 | Explain the project to leaders or a new team member | `docs/18-the-story.md` (Part 1 non-technical, Part 2 file-by-file) |
 | Justify the design to reviewers | `docs/13-solution-justification.md` |
 | Manual test with expected output | `docs/14-manual-test-guide.md` (T-numbered scenarios) |

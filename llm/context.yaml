@@ -15,11 +15,13 @@ guardrail:
   annotations:
     request: guardrails.example.com/delete-request          # "<ticket>: <reason>"
     requested_by: guardrails.example.com/delete-requested-by # must equal caller
+    requested_at: guardrails.example.com/delete-requested-at # RFC3339Z, required; request withdrawn after request_ttl
     approvals: guardrails.example.com/delete-approvals      # "user|RFC3339Z,user|RFC3339Z", append one entry per approver
   param: { kind: GuardrailConfig, apiVersion: guardrails.example.com/v1alpha1, name: default }
   min_approvers: 2
   executor_may_be_approver: false
   approval_ttl: 4h
+  request_ttl: 24h
   exempt_users: [system:apiserver, system:serviceaccount:guardrails-system:breakglass]
   gitops_controllers_exempt: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller, system:serviceaccount:openshift-gitops:openshift-gitops-applicationset-controller]
   gitops_service_accounts_trusted_mutators: [system:serviceaccount:openshift-gitops:openshift-gitops-argocd-server, system:serviceaccount:openshift-gitops-operator:openshift-gitops-operator-controller-manager]
@@ -27,13 +29,15 @@ guardrail:
   rbac_tiers:
     tier_a_workflow: [argocds, applications, applicationsets, appprojects, guardrailconfigs, validatingadmissionpolicies, validatingadmissionpolicybindings, guardrails-* cluster RBAC, groups, apiservers, oauths, lokistacks, alertingrules, clusterlogforwarders, prometheusrules, schedules, dataprotectionapplications, named cronjobs/configmaps]
     tier_b_breakglass_or_git_only: [namespaces, customresourcedefinitions, subscriptions, clusterserviceversions, operatorgroups, secrets, serviceaccounts]
-  reaper: { cronjob: guardrails-system/approval-reaper, may: remove-only, also_removes: future-dated or invalid timestamps }
+  reaper: { cronjob: guardrails-system/approval-reaper, schedule: every 10 min, may: remove-only, removes: [approvals older than approval_ttl, requests older than request_ttl, future-dated or invalid or undated entries] }
+  notifications: { source: "audit annotation guardrails-deletion-tracker/state (event, have, need, remaining, ready, expiries)", route: 'audience="approvers" -> guardrail-approvers (approvers email list + Teams channel)', doc: docs/19 }
   policies:
     - { name: guardrails-critical-delete, bindings: [guardrails-critical-delete-labelled, guardrails-critical-delete-named], rules: [V1 delete, V2 label, V3 approvals, V4 request] }
     - { name: guardrails-impersonation-dry-run-only, bindings: [guardrails-impersonation-dry-run-only], rule: non-dry-run writes by identities lacking their auth marker are denied }
     - { name: guardrails-critical-label-control, bindings: [guardrails-critical-label-control], rule: only trusted identities may add the critical label }
     - { name: guardrails-gitops-only-mutation, bindings: [guardrails-gitops-only-mutation, guardrails-gitops-only-mutation-hardened], hardened_is_deny_in_all_phases: true }
     - { name: guardrails-rbac-escalation-audit, bindings: [guardrails-rbac-escalation-audit], never_denies: true }
+    - { name: guardrails-deletion-tracker, bindings: [guardrails-deletion-tracker], never_denies: true, failure_policy: Ignore, records: approval state for notifications }
   name_protected:
     namespaces: [openshift-gitops, openshift-gitops-operator, guardrails-system, openshift-logging, openshift-adp]
     crd_groups: [argoproj.io, guardrails.example.com, loki.grafana.com, observability.openshift.io, velero.io, oadp.openshift.io]
@@ -59,7 +63,7 @@ phase_selector: 'spec.source.path of Application openshift-gitops/guardrails (ch
 alerts:
   label: guardrail=true
   critical_route: { receivers: [email, msteamsv2], group_wait: 0s, repeat: 30m }
-  key_alerts: [CriticalResourceDeleted, GitOpsCriticalDeletionApplied, GitOpsResourceDeleted, CriticalResourceDeleteDenied, CriticalDeleteWouldBeDenied, ArgoCDCredentialSecretDeleted, GuardrailPolicyModified, AuditProfileChanged, PrivilegedRBACChange, ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted, BreakGlassUsed, KubeadminOrSystemAdminUsed, ArgoCDApplicationControllerMissing, GitOpsNamespaceTerminating, AuditLogIngestionStalled, GuardrailPolicyEvaluationErrors, GuardrailNotificationFailing, ImpersonatedWriteDenied]
+  key_alerts: [CriticalResourceDeleted, GitOpsCriticalDeletionApplied, GitOpsResourceDeleted, CriticalResourceDeleteDenied, CriticalDeleteWouldBeDenied, ArgoCDCredentialSecretDeleted, GuardrailPolicyModified, AuditProfileChanged, PrivilegedRBACChange, ImpersonationUsed, PrivilegedIdentityImpersonated, PrivilegedTokenMinted, BreakGlassUsed, KubeadminOrSystemAdminUsed, ArgoCDApplicationControllerMissing, GitOpsNamespaceTerminating, AuditLogIngestionStalled, GuardrailPolicyEvaluationErrors, GuardrailNotificationFailing, ImpersonatedWriteDenied, GuardrailReaperNotRunning, CriticalDeletionRequested, CriticalDeletionApproved, CriticalDeletionApprovalsExpired, CriticalDeletionRequestClosed, CriticalDeletionPendingApproval, CriticalDeletionAwaitingExecution]
 audit:
   profile: WriteRequestBodies
   loki_tenant: audit
