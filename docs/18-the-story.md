@@ -283,7 +283,7 @@ flowchart LR
 | 3 Admission policy | cluster-admin can delete anything with one command | `ValidatingAdmissionPolicy` enforcing request + 2 approvers + executor | `manifests/03-guardrails` |
 | 4 Self-protection | Someone disables the control first | policy objects are critical and GitOps-only in every phase; self-heal; P1 alert | `manifests/03-guardrails` |
 | 5 Audit | "Who did it?" has no reliable answer | API-server audit with request bodies, forwarded to SIEM and Loki | `manifests/01-audit` |
-| 6 Detection | Nobody notices | 25 audit-log alerts + 16 metrics alerts that work even if audit forwarding is blinded | `manifests/05-alerting`, `manifests/07-hardening-extras` |
+| 6 Detection | Nobody notices | 27 audit-log alerts + 17 metrics alerts that work even if audit forwarding is blinded | `manifests/05-alerting`, `manifests/07-hardening-extras` |
 | 7 Notification | Alerts sit unread in a console | Alertmanager to email and Teams with no grouping delay; delivery failure alerted | `manifests/05-alerting` |
 | 8 Recovery | Damage done anyway | OADP schedules, etcd snapshots, Git cold start, rehearsed restore | `manifests/06-backup`, `manifests/07-hardening-extras` |
 
@@ -534,8 +534,8 @@ A blocked deletion that nobody hears about is a missed warning; a successful one
 
 ### How
 
-- **Pipeline A, audit-based (25 Loki alert rules):** key alerts include `CriticalResourceDeleted` (critical), `GitOpsCriticalDeletionApplied`, `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phases 1 and 2), `GuardrailPolicyModified`, `AuditProfileChanged`, `PrivilegedRBACChange`, `ImpersonatedWriteDenied`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `KubeadminOrSystemAdminUsed`, `ArgoCDDirectMutation`, `ControlPlaneNodeAccess`.
-- **Pipeline B, metrics-based (16 Prometheus rules), independent of audit logs:** Argo CD controller, server or operator missing, GitOps namespace terminating, guardrails app out of sync, audit ingestion stalled, forwarder not ready, reaper failing, Loki ruler down, policy evaluation errors, and **notification delivery failing**.
+- **Pipeline A, audit-based (27 Loki alert rules):** key alerts include `CriticalResourceDeleted` (critical), `GitOpsCriticalDeletionApplied`, `CriticalResourceDeleteDenied`, `CriticalDeleteWouldBeDenied` (phases 1 and 2), `GuardrailPolicyModified`, `AuditProfileChanged`, `PrivilegedRBACChange`, `ImpersonatedWriteDenied`, `PrivilegedIdentityImpersonated`, `PrivilegedTokenMinted`, `BreakGlassUsed`, `KubeadminOrSystemAdminUsed`, `ArgoCDDirectMutation`, `ControlPlaneNodeAccess`.
+- **Pipeline B, metrics-based (17 Prometheus rules), independent of audit logs:** Argo CD controller, server or operator missing, GitOps namespace terminating, guardrails app out of sync, audit ingestion stalled, forwarder not ready, reaper failing, Loki ruler down, policy evaluation errors, and **notification delivery failing**.
 - **Alertmanager 0.29** routes every alert labelled `guardrail="true"` to email and a Teams channel (native `msteamsv2_configs` with a Teams Workflows webhook), `group_wait: 0s`, repeating every 30 minutes until resolved, and also to the default on-call receiver.
 
 ```mermaid
@@ -543,11 +543,11 @@ flowchart LR
     subgraph A["Pipeline A - audit based"]
         KAS["kube-apiserver audit"] --> VEC["Vector collector"]
         VEC --> LK[("LokiStack audit tenant")]
-        LK --> LR["Loki ruler<br/>25 alert rules"]
+        LK --> LR["Loki ruler<br/>27 alert rules"]
         VEC --> SPL[("Splunk SIEM")]
     end
     subgraph B["Pipeline B - metrics based"]
-        MET["Argo CD, forwarder, reaper,<br/>VAP and Alertmanager metrics"] --> PR["Prometheus<br/>16 alert rules"]
+        MET["Argo CD, forwarder, reaper,<br/>VAP and Alertmanager metrics"] --> PR["Prometheus<br/>17 alert rules"]
     end
     LR --> AM["Alertmanager<br/>route guardrail=true<br/>group_wait 0s, repeat 30m"]
     PR --> AM
@@ -624,7 +624,7 @@ The repository is **one Argo CD Application**. Its `spec.source.path` points at 
 
 | File | Role |
 |---|---|
-| `manifests/base/kustomization.yaml` | renders everything once (91 objects), in dependency order |
+| `manifests/base/kustomization.yaml` | renders everything once (92 objects), in dependency order |
 | `manifests/overlays/phase1-audit/` | deletion, label-control, gitops-only, impersonation bindings `[Audit]`; hardened binding `[Deny, Audit]` |
 | `manifests/overlays/phase2-warn/` | the same bindings `[Warn, Audit]` |
 | `manifests/overlays/phase3-enforce/` | deletion, label-control, impersonation `[Deny, Audit]`; gitops-only still `[Audit]` |
@@ -635,7 +635,7 @@ The repository is **one Argo CD Application**. Its `spec.source.path` points at 
 | Tool | What it proves |
 |---|---|
 | `scripts/verify-install.sh` | every layer is healthy: policies ready, bindings present, config present, forwarder ready, ruler loaded, Alertmanager config valid, backups scheduled |
-| `scripts/test-guardrails.sh` | 76 allow/deny expectations in a scratch namespace; reads each binding's live action so it is correct in every phase; writes an evidence log |
+| `scripts/test-guardrails.sh` | 80 allow/deny expectations in a scratch namespace; reads each binding's live action so it is correct in every phase; writes an evidence log |
 | `docs/14-manual-test-guide.md` | T-numbered scenarios with the exact command and expected output, for sign-off |
 | `docs/16-production-readiness-review.md` | 59 audit findings with fixes, and the control-to-test traceability matrix |
 | `scripts/check-mermaid.mjs`, `scripts/build-html-docs.mjs` | diagrams render on GitHub; the published site matches the Markdown |
@@ -691,6 +691,7 @@ flowchart TB
 | `docs/15-implementation-guide.md` | the step-by-step build, Parts A to G, with a tracking table |
 | `docs/17-impersonation-control.md` | why `--as` is limited to reads and dry-runs |
 | `docs/19-deletion-approval-lifecycle.md` | how a deletion is prevented, how approvers are notified, how approvals are counted and how long requests live |
+| `docs/20-deletion-simulation.md` | the whole flow simulated command by command, and every attempt to fake an approval |
 | `AGENTS.md`, `CLAUDE.md`, `llms.txt`, `llm/`, `.claude/` | a compact operating guide, skills and agents so AI assistants can help without weakening the controls |
 | `html/` | this published site: portal, study guide and the generated documents |
 

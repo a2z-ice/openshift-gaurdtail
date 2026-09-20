@@ -141,6 +141,10 @@ spec:
         && has(object.binaryData) == has(oldObject.binaryData) && (!has(object.binaryData) || object.binaryData == oldObject.binaryData)
         && has(object.immutable) == has(oldObject.immutable) && (!has(object.immutable) || object.immutable == oldObject.immutable)
         && has(object.operation) == has(oldObject.operation) && (!has(object.operation) || object.operation == oldObject.operation)
+        && has(object.stringData) == has(oldObject.stringData) && (!has(object.stringData) || object.stringData == oldObject.stringData)
+        && has(object.secrets) == has(oldObject.secrets) && (!has(object.secrets) || object.secrets == oldObject.secrets)
+        && has(object.imagePullSecrets) == has(oldObject.imagePullSecrets) && (!has(object.imagePullSecrets) || object.imagePullSecrets == oldObject.imagePullSecrets)
+        && has(object.automountServiceAccountToken) == has(oldObject.automountServiceAccountToken) && (!has(object.automountServiceAccountToken) || object.automountServiceAccountToken == oldObject.automountServiceAccountToken)
         && has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
         && has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences)
   validations:
@@ -187,9 +191,16 @@ spec:
     name: default
     parameterNotFoundAction: Deny
   # Self-protection set: Deny in EVERY phase (no overlay patches this binding).
+  # The policy only denies for CRITICAL objects, so tenant Applications/AppProjects (unlabelled) are untouched.
   validationActions: ["Deny", "Audit"]
   matchResources:
     resourceRules:
+      # Argo CD objects that select the phase and own the guardrails: repointing the guardrails Application at the
+      # phase1 overlay would otherwise disable enforcement permanently, applied by the exempt Argo CD controller.
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["applications", "applicationsets", "appprojects", "argocds"]
       - apiGroups: ["guardrails.example.com"]
         apiVersions: ["*"]
         operations: ["UPDATE"]

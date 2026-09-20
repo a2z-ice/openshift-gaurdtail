@@ -163,6 +163,9 @@ expect deny        "cluster-admin adds self to exemptUsers"                     
 expect deny        "approver adds self to platform-admins group"                  -- as approver1 -- patch group platform-admins --type merge -p "{\"users\":[\"$APP1\"]}" --dry-run=server
 expect deny        "approver changes reaper CronJob serviceAccount"               -- as approver1 -- -n guardrails-system patch cronjob approval-reaper --type merge -p '{"spec":{"jobTemplate":{"spec":{"template":{"spec":{"serviceAccountName":"breakglass"}}}}}}' --dry-run=server
 expect allow       "approver may still annotate a self-protection object"         -- as approver1 -- annotate guardrailconfig default "$PFX/delete-request=CHG-test: rehearsal" "$PFX/delete-requested-by=$APP1" "$PFX/delete-requested-at=$(ts)" --overwrite --dry-run=server
+expect deny        "cluster-admin repoints the guardrails Application at the phase1 overlay" -- as admin -- -n openshift-gitops patch application guardrails --type merge -p '{"spec":{"source":{"path":"manifests/overlays/phase1-audit"}}}' --dry-run=server
+expect deny        "cluster-admin widens the locked default AppProject"                  -- as admin     -- -n openshift-gitops patch appproject default --type merge -p '{"spec":{"sourceRepos":["*"]}}' --dry-run=server
+expect deny        "approver edits the guardrails AppProject destinations"               -- as approver1 -- -n openshift-gitops patch appproject guardrails --type merge -p '{"spec":{"destinations":[{"namespace":"*","server":"*"}]}}' --dry-run=server
 expect "$DENY_MUT" "human edits spec of a critical object (gitops-only, phase 4 denies)" -- as admin -- -n "$NS" patch configmap victim --type merge -p '{"data":{"a":"hand-edited"}}' --dry-run=server
 
 echo "== 5. forged approvals are rejected"
@@ -183,6 +186,9 @@ expect "$DENY_DEL" "approver1 approves AND changes data in one patch"           
 oc -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals-" >/dev/null 2>&1 || true
 expect allow       "approver1 approves"                                           -- as approver1 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts)"
 expect "$DENY_DEL" "executor deletes with only 1 approval"                        -- as executor  -- -n "$NS" delete configmap victim
+if [[ "$IMPERSONATE" == "true" ]]; then
+  expect "$DENY_DEL" "approver1 approves again under a different letter case (same person)" -- oc --as="$(echo "$APP1" | tr '[:lower:]' '[:upper:]')" --as-group="$APPROVER_GROUP" --as-group=system:authenticated --as-user-extra="$HUMAN_EXTRA" -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$(approvals_of victim),$(echo "$APP1" | tr '[:lower:]' '[:upper:]')|$(ts)"
+fi
 expect "$DENY_DEL" "approver1 approves a second time"                             -- as approver1 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$(approvals_of victim),$APP1|$(ts)"
 expect "$DENY_DEL" "approver2 replaces the list (drops approver1)"                -- as approver2 -- -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP2|$(ts)"
 if [[ "$DENY_DEL" == "allow" ]]; then oc -n "$NS" annotate configmap victim --overwrite "$PFX/delete-approvals=$APP1|$(ts)" >/dev/null 2>&1; fi   # phase 1/2 repair

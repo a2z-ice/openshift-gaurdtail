@@ -4,7 +4,7 @@
 <script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
 </head><body>
 <header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
-<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="20-deletion-simulation.html">Simulation</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
 <button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
 <main>
 <h1>16 · Production readiness review: findings, fixes and test traceability</h1>
@@ -344,6 +344,42 @@
 <td><strong>Fixed.</strong> Four new invariants in <code>policy-ci.yaml</code>.</td>
 </tr>
 </tbody></table>
+<h3>Simulation review (2026-09-19, docs/20)</h3>
+<p>Playing the whole flow out command by command, including 20 tampering attempts, found five more issues. Detail: docs/20 Part E.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Finding</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>G9</td>
+<td><strong>Critical.</strong> Every overlay renders the guardrails Application pointing at itself, and the <code>-hardened</code> binding did not cover Argo CD objects: one <code>oc patch</code> of <code>spec.source.path</code> moved the cluster back to phase 1 permanently, applied by the exempt Argo CD controller.</td>
+<td><strong>Fixed.</strong> Critical <code>applications</code>, <code>applicationsets</code>, <code>appprojects</code>, <code>argocds</code> added to the always-Deny binding; CI invariant added; automated §4 case.</td>
+</tr>
+<tr>
+<td>G12</td>
+<td><strong>High.</strong> Argo CD&#39;s stock <code>default</code> AppProject allows every repo, destination and kind, so anyone able to create an Application could have the exempt controller apply arbitrary manifests.</td>
+<td><strong>Fixed.</strong> <code>appproject-default-locked.yaml</code> (empty repos/destinations/whitelists, critical), CI keeps it empty, new alert <code>ArgoCDApplicationWrittenOutOfBand</code>.</td>
+</tr>
+<tr>
+<td>G10</td>
+<td><code>payloadUnchanged</code> ignored <code>stringData</code>, <code>secrets</code>, <code>imagePullSecrets</code>, <code>automountServiceAccountToken</code>.</td>
+<td><strong>Fixed</strong> in both mutation policies.</td>
+</tr>
+<tr>
+<td>G11</td>
+<td>Approver names were compared case-sensitively (two spellings of one identity could count twice).</td>
+<td><strong>Fixed</strong>: lower-cased comparison for distinctness, requester and executor checks.</td>
+</tr>
+<tr>
+<td>G13</td>
+<td>A namespace holding a critical object stays Terminating with no alert; webhook configuration changes were not alerted.</td>
+<td><strong>Fixed</strong>: <code>NamespaceStuckTerminating</code>, <code>AdmissionWebhookConfigurationChanged</code>.</td>
+</tr>
+</tbody></table>
 <h2>3. Test traceability matrix</h2>
 <p>Every control has at least one automated case (A = section/case in <code>scripts/test-guardrails.sh</code>, which is phase-aware) or a manual case (M = T-number in <code>docs/14</code>), and the alert that proves detection. &quot;verify&quot; = <code>scripts/verify-install.sh</code>. Nothing is uncovered.</p>
 <table>
@@ -470,10 +506,28 @@
 <td>GuardrailReaperNotRunning</td>
 </tr>
 <tr>
-<td>CEL compiles (no unterminated literal or unbalanced bracket), tracker parity, TTL windows</td>
+<td>CEL compiles (no unterminated literal or unbalanced bracket), tracker parity, TTL windows, hardened coverage, locked default project</td>
 <td>CI</td>
 <td>–</td>
 <td>policy-ci invariants</td>
+</tr>
+<tr>
+<td>Phase cannot be changed out of band (guardrails Application, AppProjects, ArgoCD CR)</td>
+<td>§4</td>
+<td>docs/20 A11</td>
+<td>GuardrailPolicyModified, ArgoCDApplicationWrittenOutOfBand</td>
+</tr>
+<tr>
+<td>Approver identity case-folding; approval payload cannot carry a Secret/ServiceAccount change</td>
+<td>§6</td>
+<td>docs/20 A4, A6</td>
+<td>denied</td>
+</tr>
+<tr>
+<td>Namespace stuck Terminating; webhook configuration changed</td>
+<td>–</td>
+<td>docs/20 A16, A17</td>
+<td>NamespaceStuckTerminating, AdmissionWebhookConfigurationChanged</td>
 </tr>
 <tr>
 <td>V3 reaper remove-only; cannot add</td>
@@ -631,7 +685,7 @@
 <p>Still to observe on your cluster (cannot be proven locally): R3 (does VAP evaluate deletes of its own bindings on your build), R6 (Loki field names after Logging upgrades), the CEL compile on the API server (first <code>--dry-run=server</code> in Part C1), and the real latency of alert delivery (T9.2).</p>
 <p>Accepted residual risks: R1 is now closed for human roles by docs/17 (impersonation restricted to reads, access reviews and dry-runs; only the vaulted <code>system:masters</code> certificate can still forge identities), R2 (node/etcd access: SSH lockdown example, encryption, exec alert), R7 (repository or controller-token compromise: ruleset, PR correlation of every Git-driven deletion, token-mint alert), R8 (Tier-B kinds need break-glass out of band: deliberate).</p>
 
-<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a></p>
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a> · <a href="20-deletion-simulation.html">20 · deletion-simulation</a></p>
 </main>
 <footer>Generated from <code>docs/16-production-readiness-review.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
 <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>

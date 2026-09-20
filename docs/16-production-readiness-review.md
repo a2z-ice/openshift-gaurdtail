@@ -96,6 +96,18 @@ Tracing one request through prevention, notification, counting and expiry found 
 | G8 | The reaper's GNU `date -d` accepted `""`, `now`, `yesterday` as timestamps (an `x\|now` approval would never expire). | **Fixed.** Strict RFC3339 check before parsing (reaper, `lib.sh`). |
 | G7 | CI did not check CEL syntax, tracker parity or TTL windows. | **Fixed.** Four new invariants in `policy-ci.yaml`. |
 
+### Simulation review (2026-09-19, docs/20)
+
+Playing the whole flow out command by command, including 20 tampering attempts, found five more issues. Detail: docs/20 Part E.
+
+| # | Finding | Resolution |
+|---|---|---|
+| G9 | **Critical.** Every overlay renders the guardrails Application pointing at itself, and the `-hardened` binding did not cover Argo CD objects: one `oc patch` of `spec.source.path` moved the cluster back to phase 1 permanently, applied by the exempt Argo CD controller. | **Fixed.** Critical `applications`, `applicationsets`, `appprojects`, `argocds` added to the always-Deny binding; CI invariant added; automated §4 case. |
+| G12 | **High.** Argo CD's stock `default` AppProject allows every repo, destination and kind, so anyone able to create an Application could have the exempt controller apply arbitrary manifests. | **Fixed.** `appproject-default-locked.yaml` (empty repos/destinations/whitelists, critical), CI keeps it empty, new alert `ArgoCDApplicationWrittenOutOfBand`. |
+| G10 | `payloadUnchanged` ignored `stringData`, `secrets`, `imagePullSecrets`, `automountServiceAccountToken`. | **Fixed** in both mutation policies. |
+| G11 | Approver names were compared case-sensitively (two spellings of one identity could count twice). | **Fixed**: lower-cased comparison for distinctness, requester and executor checks. |
+| G13 | A namespace holding a critical object stays Terminating with no alert; webhook configuration changes were not alerted. | **Fixed**: `NamespaceStuckTerminating`, `AdmissionWebhookConfigurationChanged`. |
+
 ## 3. Test traceability matrix
 
 Every control has at least one automated case (A = section/case in `scripts/test-guardrails.sh`, which is phase-aware) or a manual case (M = T-number in `docs/14`), and the alert that proves detection. "verify" = `scripts/verify-install.sh`. Nothing is uncovered.
@@ -121,7 +133,10 @@ Every control has at least one automated case (A = section/case in `scripts/test
 | Approval progress visible (have / need / remaining, expiries) | – | T6.4 | status-deletion.sh, list-pending-deletions.sh |
 | Approvers notified: request, each approval, expiry, closure, reminders | – | T6.5 | CriticalDeletion{Requested,Approved,ApprovalsExpired,RequestClosed,PendingApproval,AwaitingExecution} |
 | Reaper not running / suspended / missing | verify (CronJob present) | suspend the CronJob on pre-prod for 40 min | GuardrailReaperNotRunning |
-| CEL compiles (no unterminated literal or unbalanced bracket), tracker parity, TTL windows | CI | – | policy-ci invariants |
+| CEL compiles (no unterminated literal or unbalanced bracket), tracker parity, TTL windows, hardened coverage, locked default project | CI | – | policy-ci invariants |
+| Phase cannot be changed out of band (guardrails Application, AppProjects, ArgoCD CR) | §4 | docs/20 A11 | GuardrailPolicyModified, ArgoCDApplicationWrittenOutOfBand |
+| Approver identity case-folding; approval payload cannot carry a Secret/ServiceAccount change | §6 | docs/20 A4, A6 | denied |
+| Namespace stuck Terminating; webhook configuration changed | – | docs/20 A16, A17 | NamespaceStuckTerminating, AdmissionWebhookConfigurationChanged |
 | V3 reaper remove-only; cannot add | §8 | T6.2 | GuardrailReaperFailing (negative) |
 | **V4** request by someone else's name; developer outside groups; reason edited after approvals; cancel by third party | §5, §6, §7 | T4.2, T4.3, T4.16, T6.1 | denied / allowed |
 | **Label control** UPDATE by requester/admin denied, approver allowed; CREATE with label denied | §1 | T3.10 | denied |

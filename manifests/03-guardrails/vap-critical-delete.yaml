@@ -192,6 +192,8 @@ spec:
       expression: "variables.newApprovalsRaw == '' ? [] : variables.newApprovalsRaw.split(',')"
     - name: oldApprovers
       expression: "variables.oldApprovals.map(e, e.split('|')[0])"
+    - name: oldApproversLower
+      expression: "variables.oldApprovers.map(u, u.lowerAscii())"
     - name: addedApprovals
       expression: "variables.newApprovals.filter(e, !(e in variables.oldApprovals))"
     - name: removedApprovals
@@ -203,15 +205,15 @@ spec:
         variables.newRequestedBy == variables.oldRequestedBy && variables.newRequest == variables.oldRequest
         && variables.newRequestedAt == variables.oldRequestedAt
     - name: oldApproversDistinct
-      expression: "variables.oldApprovers.size() <= 32 && variables.oldApprovers.all(u, variables.oldApprovers.filter(x, x == u).size() == 1)"
+      expression: "variables.oldApproversLower.size() <= 32 && variables.oldApproversLower.all(u, variables.oldApproversLower.filter(x, x == u).size() == 1)"
     # ---- the two-person rule, evaluated on the PRE-request state
     - name: deletionApproved
       expression: >-
         variables.oldRequestedBy != '' && variables.oldRequest != '' && variables.oldRequestedAt != ''
         && variables.oldApprovers.size() >= params.spec.minApprovers
         && variables.oldApproversDistinct
-        && !(variables.oldRequestedBy in variables.oldApprovers)
-        && (params.spec.executorMayBeApprover || !(request.userInfo.username in variables.oldApprovers))
+        && !(variables.oldRequestedBy.lowerAscii() in variables.oldApproversLower)
+        && (params.spec.executorMayBeApprover || !(request.userInfo.username.lowerAscii() in variables.oldApproversLower))
     - name: newLabelCritical
       expression: "'guardrails.example.com/critical' in variables.newLabels && variables.newLabels['guardrails.example.com/critical'] == 'true'"
     # ---- "nothing but guardrail annotations changed" (prevents smuggling a spec change into an approval)
@@ -234,6 +236,10 @@ spec:
           && has(object.binaryData) == has(oldObject.binaryData) && (!has(object.binaryData) || object.binaryData == oldObject.binaryData)
           && has(object.immutable) == has(oldObject.immutable) && (!has(object.immutable) || object.immutable == oldObject.immutable)
           && has(object.operation) == has(oldObject.operation) && (!has(object.operation) || object.operation == oldObject.operation)
+          && has(object.stringData) == has(oldObject.stringData) && (!has(object.stringData) || object.stringData == oldObject.stringData)
+          && has(object.secrets) == has(oldObject.secrets) && (!has(object.secrets) || object.secrets == oldObject.secrets)
+          && has(object.imagePullSecrets) == has(oldObject.imagePullSecrets) && (!has(object.imagePullSecrets) || object.imagePullSecrets == oldObject.imagePullSecrets)
+          && has(object.automountServiceAccountToken) == has(oldObject.automountServiceAccountToken) && (!has(object.automountServiceAccountToken) || object.automountServiceAccountToken == oldObject.automountServiceAccountToken)
           && has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers)
           && has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) )
     - name: onlyGuardrailAnnotationsChanged
@@ -270,9 +276,9 @@ spec:
              && variables.isApprover
              && variables.addedApprovals[0].matches('^[^|,]+\\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')
              && variables.addedApprovals[0].split('|')[0] == request.userInfo.username
-             && !(request.userInfo.username in variables.oldApprovers)
+             && !(request.userInfo.username.lowerAscii() in variables.oldApproversLower)
              && variables.newRequestedBy != '' && variables.newRequest != '' && variables.newRequestedAt != ''
-             && request.userInfo.username != variables.newRequestedBy
+             && request.userInfo.username.lowerAscii() != variables.newRequestedBy.lowerAscii()
              && variables.requestUnchanged
              && variables.onlyGuardrailAnnotationsChanged )
       reason: Forbidden

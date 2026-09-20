@@ -136,6 +136,21 @@ spec:
               so an old approval could still satisfy the two-person rule. Check oc -n guardrails-system get cronjob approval-reaper
               and the last job's logs; the CronJob is GitOps-only, so Argo CD self-heal should restore it.
             runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/19-deletion-approval-lifecycle.md#reaper-health
+        - alert: NamespaceStuckTerminating
+          expr: |
+            kube_namespace_status_phase{phase="Terminating"} == 1
+          for: 20m
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Namespace {{ $labels.namespace }} has been Terminating for 20 minutes"
+            description: >-
+              A namespace cannot finish deleting while it still contains a critical object: the namespace controller's
+              deletes are denied by the guardrail (it is not an exempt identity). Finish those objects through the
+              deletion workflow, or remove the critical label through Git. scripts/list-pending-deletions.sh shows open requests.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/20-deletion-simulation.md#a9
         - alert: LokiRulerDown
           expr: |
             absent(up{namespace="openshift-logging", job=~"logging-loki-ruler.*"}) or up{namespace="openshift-logging", job=~"logging-loki-ruler.*"} == 0

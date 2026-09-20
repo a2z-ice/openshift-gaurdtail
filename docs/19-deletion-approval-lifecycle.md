@@ -433,7 +433,7 @@ The Teams card and email show the approval fields when present: **Approvals** *h
 
 ## 9. Defects and gaps found, and what was fixed
 
-Found while tracing this lifecycle through the code on 2026-09-19. All are fixed in this repository.
+Found while tracing this lifecycle through the code on 2026-09-19. All are fixed in this repository. The step-by-step simulation in `docs/20` found five more (G9 to G13), including a one-command way to move the cluster back to phase 1.
 
 | # | Severity | Finding | Impact | Fix | Files | Test |
 |---|---|---|---|---|---|---|

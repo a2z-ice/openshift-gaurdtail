@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------------
+# AppProject "default" - LOCKED.
+#
+# Why: the Argo CD application-controller is a pre-approved GitOps identity (exempt from the two-person rule).
+# Anyone who can CREATE an Application therefore has a laundering path: point a new Application at a repository
+# they control and the exempt controller applies whatever it contains - including patching the guardrail bindings
+# to Audit or pruning critical objects. Argo CD's own `default` project permits every repo, destination and kind.
+#
+# This object empties it. Real workloads use their own AppProject, defined in Git and reviewed (docs/05).
+# The project is critical, so out-of-band edits are denied in EVERY phase by the -hardened binding.
+#
+# Before applying, check what still uses it:
+#   oc -n openshift-gitops get applications,applicationsets -o jsonpath='{range .items[?(@.spec.project=="default")]}{.metadata.name}{"\n"}{end}'
+# Move each one to a named project in the same PR.
+#
+# Phase   : 1
+# Rollback: restore the previous spec by PR (2 reviewers); the project is self-healed by Argo CD.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: openshift-gitops
+  labels:
+    guardrails.example.com/critical: "true"
+    app.kubernetes.io/part-of: guardrails
+spec:
+  description: Locked by the guardrails. Use a named AppProject defined in Git.
+  sourceRepos: []
+  destinations: []
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist: []

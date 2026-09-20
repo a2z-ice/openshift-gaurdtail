@@ -104,6 +104,15 @@ jobs:
           for f in glob.glob('manifests/**/*.yaml', recursive=True):
               for d in yaml.safe_load_all(open(f)):
                   if d and d.get('kind') == 'ValidatingAdmissionPolicy': walk(d, f)
+          # ---- the hardened binding must cover the Argo CD objects that select the phase and own the guardrails
+          hardened = [d for d in yaml.safe_load_all(open('manifests/03-guardrails/vap-gitops-only-mutation.yaml'))
+                      if d and d['kind'] == 'ValidatingAdmissionPolicyBinding' and d['metadata']['name'].endswith('-hardened')][0]
+          hres = {r for rule in hardened['spec']['matchResources']['resourceRules'] for r in rule['resources']}
+          for r in ('applications', 'appprojects', 'argocds', 'guardrailconfigs', 'validatingadmissionpolicybindings'):
+              if r not in hres: fail.append(f'hardened binding must cover {r} (phase/self-protection objects)')
+          dflt = [d for d in yaml.safe_load_all(open('manifests/04-argocd/appproject-default-locked.yaml')) if d][0]
+          if any(dflt['spec'].get(k) for k in ('sourceRepos', 'destinations', 'clusterResourceWhitelist', 'namespaceResourceWhitelist')):
+              fail.append('AppProject/default must stay empty: it is a laundering path through the exempt controller')
           # ---- deletion tracker: never enforces, and sees exactly what the deletion policy protects
           delp = next(yaml.safe_load_all(open('manifests/03-guardrails/vap-critical-delete.yaml')))['spec']
           trk = list(yaml.safe_load_all(open('manifests/03-guardrails/vap-deletion-tracker.yaml')))

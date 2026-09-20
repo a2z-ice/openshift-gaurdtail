@@ -34,7 +34,7 @@
 | L3 | Admission: `guardrails-critical-delete` (two-person rule for out-of-band deletes), `guardrails-critical-label-control`, `guardrails-gitops-only-mutation` (+ `-hardened`), `guardrails-rbac-escalation-audit` | S1, S2, S4–S7 |
 | L4 | Self-protection: policy objects critical, RBAC-locked, self-healed, alerted | S5 |
 | L5 | Audit: `WriteRequestBodies`, forwarded to SIEM + Loki, 90 d in-cluster, WORM buckets | forensics for all |
-| L6 | Detection: 25 Loki rules on the audit stream + 16 metrics rules, two independent pipelines | S1–S7, S9 |
+| L6 | Detection: 27 Loki rules on the audit stream + 17 metrics rules, two independent pipelines | S1–S7, S9 |
 | L7 | Notification: Alertmanager → email + Teams, no grouping delay, repeat until resolved | time-to-respond |
 | L8 | Process: GitHub 2-reviewer ruleset, CODEOWNERS, signed commits, CI invariants, quarterly recertification and restore drills | S3, S8 |
 

@@ -235,6 +235,54 @@ spec:
           annotations:
             summary: "Audit pipeline object {{ $labels.objectRef_resource }}/{{ $labels.objectRef_name }} changed by {{ $labels.user_username }}"
             description: "A change to the forwarder, LokiStack or alert rules can blind detection. Confirm it came from an approved PR."
+        - alert: ArgoCDApplicationWrittenOutOfBand
+          expr: |
+            sum by (user_username, verb, objectRef_resource, objectRef_namespace, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"create|update|patch|delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_resource=~"applications|applicationsets|appprojects"
+                | objectRef_apiGroup="argoproj.io"
+                | user_username !~ "system:serviceaccount:openshift-gitops:.*|system:serviceaccount:openshift-gitops-operator:.*|system:serviceaccount:kube-system:.*|system:apiserver"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: warning
+            guardrail: "true"
+            team: platform-engineering
+          annotations:
+            summary: "Argo CD {{ $labels.objectRef_resource }} {{ $labels.objectRef_namespace }}/{{ $labels.objectRef_name }} was {{ $labels.verb }}d out of band by {{ $labels.user_username }}"
+            description: >-
+              Applications are applied by an identity that is exempt from the two-person rule, so creating or editing one
+              out of band is a way to have arbitrary manifests applied. Critical Argo CD objects are denied in every phase
+              (hardened binding); a NEW Application is not. Confirm it references a reviewed repository and a fenced
+              AppProject, or delete it.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/20-deletion-simulation.md#a8
+        - alert: AdmissionWebhookConfigurationChanged
+          expr: |
+            sum by (user_username, verb, objectRef_resource, objectRef_name) (
+              count_over_time(
+                {log_type="audit"} | json
+                | verb=~"create|update|patch|delete"
+                | responseStatus_code >= 200 and responseStatus_code < 300
+                | objectRef_resource=~"validatingwebhookconfigurations|mutatingwebhookconfigurations"
+                | user_username !~ "system:serviceaccount:openshift-.*|system:serviceaccount:kube-system:.*|system:apiserver"
+              [2m])
+            ) > 0
+          for: 0s
+          labels:
+            severity: critical
+            guardrail: "true"
+            team: security
+          annotations:
+            summary: "Admission webhook configuration {{ $labels.objectRef_name }} was {{ $labels.verb }}d by {{ $labels.user_username }}"
+            description: >-
+              A mutating webhook runs before the guardrail policies and can rewrite objects; a validating webhook can be
+              used to block the workflow. Forged approvals are still rejected by V3 because the injected entries do not
+              name the caller, but a new webhook configuration by a human is an escalation primitive: confirm the change.
+            runbook_url: https://github.com/example-org/openshift-administration/blob/main/docs/09-runbooks.md#respond-to-a-red-alert
     - name: guardrails.identity
       interval: 30s
       rules:
